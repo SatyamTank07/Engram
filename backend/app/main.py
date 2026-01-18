@@ -1,0 +1,317 @@
+"""
+FastAPI main application with chat endpoints.
+"""
+
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+
+from . import crud, schemas, database, agent, auth
+
+# Initialize database
+database.init_db()
+
+# Create FastAPI app
+app = FastAPI(
+    title="Chat API",
+    description="FastAPI backend for chat application with LangChain",
+    version="1.0.0"
+)
+
+# CORS middleware for Next.js frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # Next.js default port
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/")
+def read_root():
+    """Health check endpoint."""
+    return {"status": "ok", "message": "Chat API is running"}
+
+
+# Authentication endpoints
+
+@app.post("/api/auth/register", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED)
+def register(
+    user_data: schemas.RegisterRequest,
+    db: Session = Depends(database.get_db)
+):
+    """Register a new user (admin use only - call via curl)."""
+    # Check if user already exists
+    existing_user = crud.get_user_by_phone(db, user_data.phone)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Phone number already registered"
+        )
+    
+    try:
+        user = crud.create_user(db, user_data.phone, user_data.password)
+        return user
+    except IntegrityError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User creation failed"
+        )
+
+
+@app.post("/api/auth/login", response_model=schemas.LoginResponse)
+def login(
+    login_data: schemas.LoginRequest,
+    db: Session = Depends(database.get_db)
+):
+    """Login with phone and password."""
+    # Get user
+    user = crud.get_user_by_phone(db, login_data.phone)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials"
+        )
+    
+    # Verify password
+    if not auth.verify_password(login_data.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials"
+        )
+    
+    # Create access token (sub must be a string)
+    access_token = auth.create_access_token(data={"sub": str(user.id)})
+    
+    return schemas.LoginResponse(
+        access_token=access_token,
+        user=user
+    )
+
+
+@app.get("/api/auth/me", response_model=schemas.UserResponse)
+def get_current_user_info(
+    current_user: database.User = Depends(auth.get_current_user)
+):
+    """Get current authenticated user."""
+    return current_user
+
+
+# Session endpoints
+
+
+
+@app.post("/api/sessions", response_model=schemas.SessionResponse)
+def create_session(
+    session_data: schemas.SessionCreate,
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Create a new chat session for the authenticated user."""
+    session = crud.create_session(db, user_id=current_user.id, title=session_data.title)
+    return session
+
+
+
+@app.get("/api/sessions", response_model=list[schemas.SessionResponse])
+def get_sessions(
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Get all chat sessions for the authenticated user."""
+    return crud.get_user_sessions(db, current_user.id)
+
+
+
+@app.get("/api/sessions/{session_id}/messages", response_model=list[schemas.MessageResponse])
+def get_session_messages(
+    session_id: str,
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Get all messages for a specific session."""
+    # Verify session exists and belongs to user
+    session = crud.get_session(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return crud.get_session_messages(db, session_id)
+
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(
+    session_id: str,
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Delete a chat session."""
+    # Verify session exists and belongs to user
+    session = crud.get_session(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    crud.delete_session(db, session_id)
+    return {"status": "deleted", "session_id": session_id}
+
+
+
+@app.post("/api/chat", response_model=schemas.ChatResponse)
+def chat(
+    chat_request: schemas.ChatRequest,
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """
+    Send a message and get AI response.
+    """
+    # Verify session exists and belongs to user
+    session = crud.get_session(db, chat_request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Get chat history
+    messages = crud.get_session_messages(db, chat_request.session_id)
+    chat_history = [
+        {"role": msg.role, "content": msg.content}
+        for msg in messages
+    ]
+    
+    # Save user message
+    user_message = crud.save_message(
+        db,
+        chat_request.session_id,
+        "user",
+        chat_request.message
+    )
+    
+    # Update session title if this is the first message
+    if len(messages) == 0:
+        title = chat_request.message[:50]
+        if len(chat_request.message) > 50:
+            title += "..."
+        crud.update_session_title(db, chat_request.session_id, title)
+    
+    try:
+        # Get AI response
+        ai_response = agent.get_agent_response(chat_request.message, chat_history)
+        
+        # Save assistant message
+        assistant_message = crud.save_message(
+            db,
+            chat_request.session_id,
+            "assistant",
+            ai_response
+        )
+        
+        return schemas.ChatResponse(
+            session_id=chat_request.session_id,
+            user_message=user_message,
+            assistant_message=assistant_message
+        )
+    
+    except Exception as e:
+        # If AI fails, still return user message but with error
+        raise HTTPException(status_code=500, detail=str(e))
+
+# PersonIdentity endpoints
+
+@app.post("/api/persons", response_model=schemas.PersonIdentityResponse, status_code=status.HTTP_201_CREATED)
+def create_person(
+    person_data: schemas.PersonIdentityCreate,
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Create a new person identity."""
+    person = crud.create_person_identity(
+        db,
+        user_id=current_user.id,
+        name=person_data.name,
+        aliases=person_data.aliases,
+        contacts=person_data.contacts,
+        short_bio=person_data.short_bio,
+        trust_score=person_data.trust_score
+    )
+    return person
+
+
+@app.get("/api/persons", response_model=list[schemas.PersonIdentityResponse])
+def get_persons(
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Get all person identities for the authenticated user."""
+    return crud.get_user_person_identities(db, current_user.id)
+
+
+@app.get("/api/persons/{person_id}", response_model=schemas.PersonIdentityResponse)
+def get_person(
+    person_id: str,
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Get a specific person identity."""
+    person = crud.get_person_identity(db, person_id)
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+    
+    if person.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return person
+
+
+@app.put("/api/persons/{person_id}", response_model=schemas.PersonIdentityResponse)
+def update_person(
+    person_id: str,
+    person_data: schemas.PersonIdentityUpdate,
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Update a person identity."""
+    person = crud.get_person_identity(db, person_id)
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+    
+    if person.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    updated_person = crud.update_person_identity(
+        db,
+        person_id,
+        name=person_data.name,
+        aliases=person_data.aliases,
+        contacts=person_data.contacts,
+        short_bio=person_data.short_bio,
+        trust_score=person_data.trust_score
+    )
+    return updated_person
+
+
+@app.delete("/api/persons/{person_id}")
+def delete_person(
+    person_id: str,
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Delete a person identity."""
+    person = crud.get_person_identity(db, person_id)
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+    
+    if person.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    crud.delete_person_identity(db, person_id)
+    return {"status": "deleted", "person_id": person_id}
