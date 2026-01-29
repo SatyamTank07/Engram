@@ -1,3 +1,5 @@
+name: engram
+
 services:
   postgres:
     image: postgres:15-alpine
@@ -6,7 +8,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: vinayak
+      POSTGRES_DB: engram
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -20,11 +22,11 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/vinayak
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/engram
     env_file:
       - .env
     volumes:
-      - .:/app 
+      - ./backend:/app
     depends_on:
       postgres:
         condition: service_healthy
