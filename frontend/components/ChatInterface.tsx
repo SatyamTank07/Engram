@@ -55,7 +55,8 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
             setMessages([...messages, response.user_message, response.assistant_message]);
         } catch (error) {
             console.error('Failed to send message:', error);
-            alert('Failed to send message. Please check your API key and try again.');
+            const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
+            console.error(`Failed to send message: ${errorMessage}`);
         } finally {
             setLoading(false);
         }
