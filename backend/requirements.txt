@@ -12,3 +12,4 @@ python-jose[cryptography]==3.3.0
 passlib==1.7.4
 bcrypt==4.0.1
 fastmcp
+neo4j>=5.0

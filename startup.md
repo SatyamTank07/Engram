@@ -28,6 +28,7 @@ The simplest way to run the entire stack (Database, Backend, and Frontend) is us
     - **Frontend**: [http://localhost:3000](http://localhost:3000)
     - **Backend API**: [http://localhost:8000](http://localhost:8000)
     - **API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
+    - **Neo4j Browser**: [http://localhost:7474](http://localhost:7474) (Login: `neo4j` / `engram_graph`)
 
 ---
 
@@ -41,7 +42,13 @@ The application expects a PostgreSQL database. You can run one via Docker:
 docker run --name engram-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=engram -p 5432:5432 -d postgres:15-alpine
 ```
 
-### B. Backend (FastAPI)
+### B. Knowledge Graph (Neo4j)
+Run the Neo4j container:
+```bash
+docker run --name engram-graph -e NEO4J_AUTH=neo4j/engram_graph -p 7474:7474 -p 7687:7687 -d neo4j:5-community
+```
+
+### C. Backend (FastAPI)
 1.  Navigate to the backend directory:
     ```bash
     cd backend
@@ -55,7 +62,7 @@ docker run --name engram-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=engram 
     uvicorn app.main:app --reload
     ```
 
-### C. Frontend (Next.js)
+### D. Frontend (Next.js)
 1.  Navigate to the frontend directory:
     ```bash
     cd frontend
@@ -69,7 +76,7 @@ docker run --name engram-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=engram 
     npm run dev
     ```
 
-### D. MCP Server
+### E. MCP Server
 If you need to run the Model Context Protocol server separately:
 ```bash
 python -m mcp_server.server

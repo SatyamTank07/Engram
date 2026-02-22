@@ -24,7 +24,9 @@ try:
         list_persons_tool,
         update_person_tool,
         delete_person_tool,
-        search_person_tool
+        search_person_tool,
+        add_relationship_tool,
+        get_relationships_tool
     )
     MCP_TOOLS_AVAILABLE = True
 except ImportError:
@@ -37,13 +39,14 @@ load_dotenv()
 # System prompt for the AI assistant
 SYSTEM_PROMPT = """You are a sophisticated AI Personal Assistant. Your primary goal is to be helpful, concise, and remarkably organized.
 
-You have access to a Personal Identity Database which allows you to store and retrieve detailed information about people the user mentions (including the user themselves).
+You have access to a Personal Identity Knowledge Graph which allows you to store and retrieve detailed information about people the user mentions (including the user themselves), and to model RELATIONSHIPS between people.
 
 CORE INSTRUCTIONS:
 1. **Be Proactive**: If a user mentions a detail about someone (e.g., "My friend John's email is john@example.com" or "I live in New York"), check if that person exists using `search_person`. If they do, `update_person` with the new info. If not, `create_person`.
-2. **Context Retrieval**: Before answering questions about specific people, use `search_person` or `list_persons` to see what you already know.
-3. **Data Integrity**: Use `get_person` to verify details before making updates.
-4. **Tool Transparency**: When you use a tool, briefly and naturally mention what you've done (e.g., "I've noted down John's new email for you.").
+2. **Detect Relationships**: If a user mentions how two people are connected (e.g., "John is my manager", "Alice and Bob are friends"), use `add_relationship` to store the connection. Make sure both people exist first.
+3. **Context Retrieval**: Before answering questions about specific people, use `search_person` or `list_persons` to see what you already know. Use `get_relationships` to understand how people are connected.
+4. **Data Integrity**: Use `get_person` to verify details before making updates.
+5. **Tool Transparency**: When you use a tool, briefly and naturally mention what you've done (e.g., "I've noted down John's new email for you.").
 
 AVAILABLE TOOLS:
 - `create_person`: Use this when a new person is mentioned for the first time.
@@ -52,6 +55,8 @@ AVAILABLE TOOLS:
 - `get_person`: Use this when you have a specific ID and need the full details.
 - `update_person`: Use this to add or change information for an existing entry.
 - `delete_person`: Use this only if the user explicitly asks to "forget" someone.
+- `add_relationship`: Use this to record how two people are connected. Relationship types include: KNOWS, FRIEND, FAMILY, COLLEAGUE, WORKS_WITH, MANAGES, REPORTS_TO, MENTOR, PARTNER, NEIGHBOR, CLASSMATE.
+- `get_relationships`: Use this to see all connections a person has.
 
 Maintain a professional yet friendly tone. If you are unsure about a piece of information, ask for clarification before storing it."""
 
@@ -148,6 +153,37 @@ def search_person(search_term: str) -> dict:
     return search_person_tool(search_term)
 
 
+class AddRelationshipInput(BaseModel):
+    from_person_name: str = Field(..., description="Name of the first person")
+    to_person_name: str = Field(..., description="Name of the second person")
+    relationship_type: str = Field(..., description="Type of relationship: KNOWS, FRIEND, FAMILY, COLLEAGUE, WORKS_WITH, MANAGES, REPORTS_TO, MENTOR, PARTNER, NEIGHBOR, CLASSMATE")
+    notes: Optional[str] = Field(default=None, description="Optional notes about the relationship")
+
+@tool(args_schema=AddRelationshipInput)
+def add_relationship(
+    from_person_name: str,
+    to_person_name: str,
+    relationship_type: str,
+    notes: Optional[str] = None
+) -> dict:
+    """Create a relationship between two people in the knowledge graph. Both persons must already exist."""
+    return add_relationship_tool(
+        from_person_name=from_person_name,
+        to_person_name=to_person_name,
+        relationship_type=relationship_type,
+        notes=notes
+    )
+
+
+class GetRelationshipsInput(BaseModel):
+    person_name: str = Field(..., description="Name of the person to find relationships for")
+
+@tool(args_schema=GetRelationshipsInput)
+def get_relationships(person_name: str) -> dict:
+    """Get all relationships for a person — shows how they are connected to others."""
+    return get_relationships_tool(person_name)
+
+
 def _get_openai_llm():
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -222,7 +258,9 @@ def get_agent_response(user_message: str, chat_history: list[dict] = None) -> st
                 list_persons,
                 update_person,
                 delete_person,
-                search_person
+                search_person,
+                add_relationship,
+                get_relationships
             ]
         
         # Bind tools if available

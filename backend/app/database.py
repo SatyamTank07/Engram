@@ -5,8 +5,8 @@ Database models and connection for FastAPI backend.
 import os
 import uuid
 from datetime import datetime
-from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey, ARRAY, JSON
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 
@@ -25,7 +25,6 @@ class User(Base):
     phone = Column(String(15), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    person_identities = relationship("PersonIdentity", back_populates="user", cascade="all, delete-orphan")
     
     sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
 
@@ -54,22 +53,6 @@ class ChatMessage(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
     
     session = relationship("ChatSession", back_populates="messages")
-
-class PersonIdentity(Base):
-    """Model for person identities."""
-    __tablename__ = "person_identities"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    name = Column(Text, nullable=False)  # canonical display name
-    aliases = Column(ARRAY(Text), default=list)  # previous names / nicknames
-    contacts = Column(JSONB, default=dict)  # phone/email/links
-    short_bio = Column(Text)
-    first_seen = Column(DateTime(timezone=True), default=datetime.utcnow)
-    last_seen = Column(DateTime(timezone=True), default=datetime.utcnow)
-    trust_score = Column(String, default="0.0")  # 0–1 confidence (stored as string, can be converted to float)
-    
-    user = relationship("User", back_populates="person_identities")
 
 
 def init_db():

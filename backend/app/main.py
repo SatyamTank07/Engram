@@ -7,10 +7,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from . import crud, schemas, database, agent, auth
+from . import crud, schemas, database, agent, auth, graph_db
 
 # Initialize database
 database.init_db()
+
+# Initialize Neo4j knowledge graph indexes
+try:
+    graph_db.init_graph_db()
+    print("Neo4j knowledge graph initialized successfully.")
+except Exception as e:
+    print(f"Warning: Could not initialize Neo4j: {e}. Person identity features may not work.")
 
 # Create FastAPI app
 app = FastAPI(
@@ -225,76 +232,70 @@ def chat(
         # If AI fails, still return user message but with error
         raise HTTPException(status_code=500, detail=str(e))
 
-# PersonIdentity endpoints
+# PersonIdentity endpoints (powered by Neo4j Knowledge Graph)
 
-@app.post("/api/persons", response_model=schemas.PersonIdentityResponse, status_code=status.HTTP_201_CREATED)
+@app.post("/api/persons", status_code=status.HTTP_201_CREATED)
 def create_person(
     person_data: schemas.PersonIdentityCreate,
     current_user: database.User = Depends(auth.get_current_user),
-    db: Session = Depends(database.get_db)
 ):
-    """Create a new person identity."""
-    person = crud.create_person_identity(
-        db,
-        user_id=current_user.id,
+    """Create a new person identity in the knowledge graph."""
+    person = graph_db.create_person_node(
+        user_id=str(current_user.id),
         name=person_data.name,
         aliases=person_data.aliases,
         contacts=person_data.contacts,
         short_bio=person_data.short_bio,
-        trust_score=person_data.trust_score
+        trust_score=person_data.trust_score,
     )
     return person
 
 
-@app.get("/api/persons", response_model=list[schemas.PersonIdentityResponse])
+@app.get("/api/persons")
 def get_persons(
     current_user: database.User = Depends(auth.get_current_user),
-    db: Session = Depends(database.get_db)
 ):
-    """Get all person identities for the authenticated user."""
-    return crud.get_user_person_identities(db, current_user.id)
+    """Get all person identities for the authenticated user from the knowledge graph."""
+    return graph_db.list_person_nodes(str(current_user.id))
 
 
-@app.get("/api/persons/{person_id}", response_model=schemas.PersonIdentityResponse)
+@app.get("/api/persons/{person_id}")
 def get_person(
     person_id: str,
     current_user: database.User = Depends(auth.get_current_user),
-    db: Session = Depends(database.get_db)
 ):
-    """Get a specific person identity."""
-    person = crud.get_person_identity(db, person_id)
+    """Get a specific person identity from the knowledge graph."""
+    person = graph_db.get_person_node(person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
     
-    if person.user_id != current_user.id:
+    if person.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=403, detail="Access denied")
     
     return person
 
 
-@app.put("/api/persons/{person_id}", response_model=schemas.PersonIdentityResponse)
+@app.put("/api/persons/{person_id}")
 def update_person(
     person_id: str,
     person_data: schemas.PersonIdentityUpdate,
     current_user: database.User = Depends(auth.get_current_user),
-    db: Session = Depends(database.get_db)
 ):
-    """Update a person identity."""
-    person = crud.get_person_identity(db, person_id)
+    """Update a person identity in the knowledge graph."""
+    person = graph_db.get_person_node(person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
     
-    if person.user_id != current_user.id:
+    if person.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=403, detail="Access denied")
     
-    updated_person = crud.update_person_identity(
-        db,
+    updated_person = graph_db.update_person_node(
         person_id,
         name=person_data.name,
         aliases=person_data.aliases,
         contacts=person_data.contacts,
         short_bio=person_data.short_bio,
-        trust_score=person_data.trust_score
+        trust_score=person_data.trust_score,
     )
     return updated_person
 
@@ -303,15 +304,14 @@ def update_person(
 def delete_person(
     person_id: str,
     current_user: database.User = Depends(auth.get_current_user),
-    db: Session = Depends(database.get_db)
 ):
-    """Delete a person identity."""
-    person = crud.get_person_identity(db, person_id)
+    """Delete a person identity from the knowledge graph."""
+    person = graph_db.get_person_node(person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
     
-    if person.user_id != current_user.id:
+    if person.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=403, detail="Access denied")
     
-    crud.delete_person_identity(db, person_id)
+    graph_db.delete_person_node(person_id)
     return {"status": "deleted", "person_id": person_id}

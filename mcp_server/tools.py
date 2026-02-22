@@ -1,18 +1,16 @@
 """
-MCP tools for PersonIdentity CRUD operations.
-Each tool corresponds to a database operation.
+MCP tools for PersonIdentity operations via Neo4j Knowledge Graph.
+Each tool corresponds to a graph database operation.
 """
 
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from backend.app import database, crud
-from sqlalchemy.orm import Session
+from backend.app import graph_db
 
 # For MVP: Hard-coded user ID (you'll need to replace this with actual user ID from your database)
 # To get a user ID, run: SELECT id FROM users LIMIT 1;
@@ -20,25 +18,15 @@ from sqlalchemy.orm import Session
 DEFAULT_USER_ID = os.getenv("MCP_DEFAULT_USER_ID", "replace-with-actual-user-uuid")
 
 
-def get_db() -> Session:
-    """Get database session."""
-    db = database.SessionLocal()
-    try:
-        return db
-    except Exception as e:
-        db.close()
-        raise e
-
-
 def create_person_tool(
     name: str,
-    aliases: Optional[list[str]] = None,
-    contacts: Optional[dict] = None,
-    short_bio: Optional[str] = None,
-    trust_score: Optional[float] = 0.0
+    aliases: list[str] | None = None,
+    contacts: dict | None = None,
+    short_bio: str | None = None,
+    trust_score: float | None = 0.0,
 ) -> dict:
     """
-    Create a new person identity in the database.
+    Create a new person identity in the knowledge graph.
     
     Use this when the user asks to remember, save, or store information about a person.
     
@@ -57,39 +45,26 @@ def create_person_tool(
         - "Store info about Alice: she's a software engineer, email alice@example.com"
         - "Save that Bob Smith (also known as Bobby) is my colleague"
     """
-    db = get_db()
     try:
-        person = crud.create_person_identity(
-            db=db,
+        person = graph_db.create_person_node(
             user_id=DEFAULT_USER_ID,
             name=name,
             aliases=aliases or [],
             contacts=contacts or {},
             short_bio=short_bio,
-            trust_score=trust_score
+            trust_score=trust_score,
         )
         
         return {
             "success": True,
             "message": f"Successfully created person: {name}",
-            "person": {
-                "id": str(person.id),
-                "name": person.name,
-                "aliases": person.aliases,
-                "contacts": person.contacts,
-                "short_bio": person.short_bio,
-                "trust_score": person.trust_score,
-                "first_seen": person.first_seen.isoformat(),
-                "last_seen": person.last_seen.isoformat()
-            }
+            "person": person,
         }
     except Exception as e:
         return {
             "success": False,
-            "message": f"Error creating person: {str(e)}"
+            "message": f"Error creating person: {str(e)}",
         }
-    finally:
-        db.close()
 
 
 def get_person_tool(person_id: str) -> dict:
@@ -108,45 +83,33 @@ def get_person_tool(person_id: str) -> dict:
         - "Show me details for person ID abc-123"
         - "Get information about person xyz-789"
     """
-    db = get_db()
     try:
-        person = crud.get_person_identity(db, person_id)
+        person = graph_db.get_person_node(person_id)
         
         if not person:
             return {
                 "success": False,
-                "message": f"Person with ID {person_id} not found"
+                "message": f"Person with ID {person_id} not found",
             }
         
-        if str(person.user_id) != DEFAULT_USER_ID:
+        if person.get("user_id") != DEFAULT_USER_ID:
             return {
                 "success": False,
-                "message": "Access denied: This person belongs to a different user"
+                "message": "Access denied: This person belongs to a different user",
             }
         
         return {
             "success": True,
-            "person": {
-                "id": str(person.id),
-                "name": person.name,
-                "aliases": person.aliases,
-                "contacts": person.contacts,
-                "short_bio": person.short_bio,
-                "trust_score": person.trust_score,
-                "first_seen": person.first_seen.isoformat(),
-                "last_seen": person.last_seen.isoformat()
-            }
+            "person": person,
         }
     except Exception as e:
         return {
             "success": False,
-            "message": f"Error retrieving person: {str(e)}"
+            "message": f"Error retrieving person: {str(e)}",
         }
-    finally:
-        db.close()
 
 
-def list_persons_tool(limit: Optional[int] = 50) -> dict:
+def list_persons_tool(limit: int | None = 50) -> dict:
     """
     List all saved persons for the current user.
     
@@ -163,48 +126,28 @@ def list_persons_tool(limit: Optional[int] = 50) -> dict:
         - "List everyone in my contacts"
         - "Who do you know about?"
     """
-    db = get_db()
     try:
-        persons = crud.get_user_person_identities(db, DEFAULT_USER_ID)
-        
-        # Apply limit
-        persons = persons[:limit]
-        
-        persons_list = [
-            {
-                "id": str(p.id),
-                "name": p.name,
-                "aliases": p.aliases,
-                "contacts": p.contacts,
-                "short_bio": p.short_bio,
-                "trust_score": p.trust_score,
-                "first_seen": p.first_seen.isoformat(),
-                "last_seen": p.last_seen.isoformat()
-            }
-            for p in persons
-        ]
+        persons = graph_db.list_person_nodes(DEFAULT_USER_ID, limit or 50)
         
         return {
             "success": True,
-            "count": len(persons_list),
-            "persons": persons_list
+            "count": len(persons),
+            "persons": persons,
         }
     except Exception as e:
         return {
             "success": False,
-            "message": f"Error listing persons: {str(e)}"
+            "message": f"Error listing persons: {str(e)}",
         }
-    finally:
-        db.close()
 
 
 def update_person_tool(
     person_id: str,
-    name: Optional[str] = None,
-    aliases: Optional[list[str]] = None,
-    contacts: Optional[dict] = None,
-    short_bio: Optional[str] = None,
-    trust_score: Optional[float] = None
+    name: str | None = None,
+    aliases: list[str] | None = None,
+    contacts: dict | None = None,
+    short_bio: str | None = None,
+    trust_score: float | None = None,
 ) -> dict:
     """
     Update an existing person's information.
@@ -228,65 +171,52 @@ def update_person_tool(
         - "Change Alice's bio to say she now works at Meta"
         - "Add 'Bobby' as an alias for Bob Smith"
     """
-    db = get_db()
     try:
         # First check if person exists and belongs to user
-        person = crud.get_person_identity(db, person_id)
+        person = graph_db.get_person_node(person_id)
         if not person:
             return {
                 "success": False,
-                "message": f"Person with ID {person_id} not found"
+                "message": f"Person with ID {person_id} not found",
             }
         
-        if str(person.user_id) != DEFAULT_USER_ID:
+        if person.get("user_id") != DEFAULT_USER_ID:
             return {
                 "success": False,
-                "message": "Access denied: This person belongs to a different user"
+                "message": "Access denied: This person belongs to a different user",
             }
         
         # Update person
-        updated_person = crud.update_person_identity(
-            db=db,
+        updated_person = graph_db.update_person_node(
             person_id=person_id,
             name=name,
             aliases=aliases,
             contacts=contacts,
             short_bio=short_bio,
-            trust_score=trust_score
+            trust_score=trust_score,
         )
         
         if not updated_person:
             return {
                 "success": False,
-                "message": "Failed to update person"
+                "message": "Failed to update person",
             }
         
         return {
             "success": True,
-            "message": f"Successfully updated person: {updated_person.name}",
-            "person": {
-                "id": str(updated_person.id),
-                "name": updated_person.name,
-                "aliases": updated_person.aliases,
-                "contacts": updated_person.contacts,
-                "short_bio": updated_person.short_bio,
-                "trust_score": updated_person.trust_score,
-                "first_seen": updated_person.first_seen.isoformat(),
-                "last_seen": updated_person.last_seen.isoformat()
-            }
+            "message": f"Successfully updated person: {updated_person.get('name', '')}",
+            "person": updated_person,
         }
     except Exception as e:
         return {
             "success": False,
-            "message": f"Error updating person: {str(e)}"
+            "message": f"Error updating person: {str(e)}",
         }
-    finally:
-        db.close()
 
 
 def delete_person_tool(person_id: str) -> dict:
     """
-    Delete a person from the database.
+    Delete a person from the knowledge graph.
     
     Use this when the user wants to remove, delete, or forget about a person.
     This action cannot be undone.
@@ -302,44 +232,41 @@ def delete_person_tool(person_id: str) -> dict:
         - "Remove the person with ID abc-123"
         - "Forget about Alice"
     """
-    db = get_db()
     try:
         # Check if person exists and belongs to user
-        person = crud.get_person_identity(db, person_id)
+        person = graph_db.get_person_node(person_id)
         if not person:
             return {
                 "success": False,
-                "message": f"Person with ID {person_id} not found"
+                "message": f"Person with ID {person_id} not found",
             }
         
-        if str(person.user_id) != DEFAULT_USER_ID:
+        if person.get("user_id") != DEFAULT_USER_ID:
             return {
                 "success": False,
-                "message": "Access denied: This person belongs to a different user"
+                "message": "Access denied: This person belongs to a different user",
             }
         
-        person_name = person.name
+        person_name = person.get("name", "Unknown")
         
-        # Delete person
-        crud.delete_person_identity(db, person_id)
+        # Delete person (and all relationships)
+        graph_db.delete_person_node(person_id)
         
         return {
             "success": True,
             "message": f"Successfully deleted person: {person_name}",
-            "deleted_id": person_id
+            "deleted_id": person_id,
         }
     except Exception as e:
         return {
             "success": False,
-            "message": f"Error deleting person: {str(e)}"
+            "message": f"Error deleting person: {str(e)}",
         }
-    finally:
-        db.close()
 
 
 def search_person_tool(search_term: str) -> dict:
     """
-    Search for persons by name.
+    Search for persons by name in the knowledge graph.
     
     Use this when the user asks about a person by name but you don't have their ID.
     Searches in the name field (case-insensitive partial match).
@@ -355,34 +282,136 @@ def search_person_tool(search_term: str) -> dict:
         - "Do you know anyone named Alice?"
         - "Search for people with 'Smith' in their name"
     """
-    db = get_db()
     try:
-        persons = crud.search_person_by_name(db, DEFAULT_USER_ID, search_term)
-        
-        persons_list = [
-            {
-                "id": str(p.id),
-                "name": p.name,
-                "aliases": p.aliases,
-                "contacts": p.contacts,
-                "short_bio": p.short_bio,
-                "trust_score": p.trust_score,
-                "first_seen": p.first_seen.isoformat(),
-                "last_seen": p.last_seen.isoformat()
-            }
-            for p in persons
-        ]
+        persons = graph_db.search_persons(DEFAULT_USER_ID, search_term)
         
         return {
             "success": True,
-            "count": len(persons_list),
+            "count": len(persons),
             "search_term": search_term,
-            "persons": persons_list
+            "persons": persons,
         }
     except Exception as e:
         return {
             "success": False,
-            "message": f"Error searching persons: {str(e)}"
+            "message": f"Error searching persons: {str(e)}",
         }
-    finally:
-        db.close()
+
+
+def add_relationship_tool(
+    from_person_name: str,
+    to_person_name: str,
+    relationship_type: str,
+    notes: str | None = None,
+) -> dict:
+    """
+    Create a relationship between two people in the knowledge graph.
+    
+    Use this when the user describes how two people are connected.
+    Both persons must already exist in the database — search for them first.
+    
+    Args:
+        from_person_name: Name of the first person (will be searched by name to find ID)
+        to_person_name: Name of the second person (will be searched by name to find ID)
+        relationship_type: Type of relationship. Use one of: 
+            KNOWS, FRIEND, FAMILY, COLLEAGUE, WORKS_WITH, MANAGES, REPORTS_TO, 
+            MENTOR, PARTNER, NEIGHBOR, CLASSMATE
+        notes: Optional notes about the relationship
+    
+    Returns:
+        Dictionary with relationship details
+    
+    Examples:
+        - "John is Alice's manager" → from=John, to=Alice, type=MANAGES
+        - "Bob and Eve are friends" → from=Bob, to=Eve, type=FRIEND
+        - "Sarah reports to Mike" → from=Sarah, to=Mike, type=REPORTS_TO
+    """
+    try:
+        # Search for both persons
+        from_results = graph_db.search_persons(DEFAULT_USER_ID, from_person_name)
+        if not from_results:
+            return {
+                "success": False,
+                "message": f"Person '{from_person_name}' not found. Create them first.",
+            }
+        
+        to_results = graph_db.search_persons(DEFAULT_USER_ID, to_person_name)
+        if not to_results:
+            return {
+                "success": False,
+                "message": f"Person '{to_person_name}' not found. Create them first.",
+            }
+        
+        from_person = from_results[0]
+        to_person = to_results[0]
+        
+        properties = {}
+        if notes:
+            properties["notes"] = notes
+        
+        result = graph_db.add_relationship(
+            from_person_id=from_person["id"],
+            to_person_id=to_person["id"],
+            rel_type=relationship_type,
+            properties=properties,
+        )
+        
+        if result:
+            return {
+                "success": True,
+                "message": f"Created relationship: {from_person['name']} -{relationship_type}-> {to_person['name']}",
+                "relationship": result,
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Failed to create relationship",
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error creating relationship: {str(e)}",
+        }
+
+
+def get_relationships_tool(person_name: str) -> dict:
+    """
+    Get all relationships for a person in the knowledge graph.
+    
+    Use this when the user asks how someone is connected to others,
+    or wants to see a person's network.
+    
+    Args:
+        person_name: Name of the person to find relationships for
+    
+    Returns:
+        Dictionary with list of relationships
+    
+    Examples:
+        - "How is John connected to others?"
+        - "Who does Alice know?"
+        - "Show me Bob's relationships"
+        - "What connections does Sarah have?"
+    """
+    try:
+        results = graph_db.search_persons(DEFAULT_USER_ID, person_name)
+        if not results:
+            return {
+                "success": False,
+                "message": f"Person '{person_name}' not found.",
+            }
+        
+        person = results[0]
+        relationships = graph_db.get_relationships(person["id"])
+        
+        return {
+            "success": True,
+            "person": person["name"],
+            "count": len(relationships),
+            "relationships": relationships,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error getting relationships: {str(e)}",
+        }
