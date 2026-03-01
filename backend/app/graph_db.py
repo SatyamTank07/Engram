@@ -107,7 +107,9 @@ def create_person_node(
         )
         record = result.single()
         if record:
-            return _node_to_dict(record["p"])
+            person = _node_to_dict(record["p"])
+            _sync_embedding(person)
+            return person
     return {}
 
 
@@ -185,12 +187,21 @@ def update_person_node(
         )
         record = result.single()
         if record:
-            return _node_to_dict(record["p"])
+            person = _node_to_dict(record["p"])
+            _sync_embedding(person)
+            return person
     return None
 
 
 def delete_person_node(person_id: str) -> bool:
     """Delete a Person node and all its relationships."""
+    # Delete embedding from pgvector first
+    try:
+        from . import vector_db
+        vector_db.delete_embedding(person_id)
+    except Exception as e:
+        print(f"Warning: Failed to delete embedding for {person_id}: {e}")
+
     driver = _get_driver()
     with driver.session() as session:
         result = session.run(
@@ -319,3 +330,28 @@ def _sanitize_rel_type(rel_type: str) -> str:
     # Only allow alphanumeric and underscores
     sanitized = "".join(c if c.isalnum() or c == "_" else "_" for c in rel_type.upper())
     return sanitized or "RELATED_TO"
+
+
+def _sync_embedding(person: dict):
+    """Sync person data to pgvector as a text embedding.
+
+    Runs in a try/except so embedding failures don't break person CRUD.
+    """
+    try:
+        from . import embedding_service, vector_db
+
+        text_content, embedding = embedding_service.generate_person_embedding(
+            name=person.get("name", ""),
+            aliases=person.get("aliases", []),
+            short_bio=person.get("short_bio", ""),
+            contacts=person.get("contacts", {}),
+        )
+        vector_db.upsert_text_embedding(
+            person_id=person["id"],
+            user_id=person["user_id"],
+            text_content=text_content,
+            embedding=embedding,
+        )
+        print(f"[EMBEDDING] ✅ Synced embedding for '{person.get('name')}': \"{text_content[:80]}...\"")
+    except Exception as e:
+        print(f"Warning: Failed to sync embedding for person {person.get('id')}: {e}")

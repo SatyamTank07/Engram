@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from backend.app import graph_db
+from backend.app import embedding_service, vector_db
 
 # For MVP: Hard-coded user ID (you'll need to replace this with actual user ID from your database)
 # To get a user ID, run: SELECT id FROM users LIMIT 1;
@@ -266,29 +267,60 @@ def delete_person_tool(person_id: str) -> dict:
 
 def search_person_tool(search_term: str) -> dict:
     """
-    Search for persons by name in the knowledge graph.
+    Search for persons using semantic similarity (with fallback to exact match).
     
-    Use this when the user asks about a person by name but you don't have their ID.
-    Searches in the name field (case-insensitive partial match).
+    Use this when the user asks about a person by name, description, or any attribute.
+    Now uses AI-powered semantic search for better matching.
     
     Args:
-        search_term: Name or partial name to search for
+        search_term: Name, description, or any identifying text to search for
     
     Returns:
-        Dictionary with matching persons
+        Dictionary with matching persons and similarity scores
     
     Examples:
         - "Find John"
         - "Do you know anyone named Alice?"
-        - "Search for people with 'Smith' in their name"
+        - "that engineer from Pune"
+        - "the person who works at Google"
     """
     try:
-        persons = graph_db.search_persons(DEFAULT_USER_ID, search_term)
+        # Try semantic search first
+        try:
+            print(f"[SEARCH] Generating embedding for: '{search_term}'")
+            query_embedding = embedding_service.generate_text_embedding(search_term)
+            matches = vector_db.semantic_search(DEFAULT_USER_ID, query_embedding, limit=5)
+            
+            if matches:
+                print(f"[SEARCH] ✅ Semantic search found {len(matches)} results:")
+                persons = []
+                for match in matches:
+                    print(f"  → {match['text_content'][:60]}... (score: {match['similarity_score']})")
+                    person = graph_db.get_person_node(match["person_id"])
+                    if person:
+                        person["similarity_score"] = match["similarity_score"]
+                        persons.append(person)
+                
+                return {
+                    "success": True,
+                    "count": len(persons),
+                    "search_term": search_term,
+                    "search_type": "semantic",
+                    "persons": persons,
+                }
+            else:
+                print(f"[SEARCH] Semantic search returned 0 results, falling back to exact match")
+        except Exception as e:
+            print(f"[SEARCH] Semantic search failed ({e}), falling back to exact match")
         
+        # Fallback: original exact match
+        print(f"[SEARCH] Using exact match for: '{search_term}'")
+        persons = graph_db.search_persons(DEFAULT_USER_ID, search_term)
         return {
             "success": True,
             "count": len(persons),
             "search_term": search_term,
+            "search_type": "exact",
             "persons": persons,
         }
     except Exception as e:
