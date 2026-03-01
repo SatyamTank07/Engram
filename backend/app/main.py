@@ -7,10 +7,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from . import crud, schemas, database, agent, auth, graph_db
+from . import crud, schemas, database, agent, auth, graph_db, vector_db
 
 # Initialize database
 database.init_db()
+
+# Initialize pgvector extension and embeddings table
+try:
+    vector_db.init_vector_db()
+    print("pgvector initialized successfully.")
+except Exception as e:
+    print(f"Warning: Could not initialize pgvector: {e}. Semantic search may not work.")
 
 # Initialize Neo4j knowledge graph indexes
 try:
@@ -315,3 +322,34 @@ def delete_person(
     
     graph_db.delete_person_node(person_id)
     return {"status": "deleted", "person_id": person_id}
+
+
+@app.post("/api/persons/search")
+def semantic_search_persons(
+    search_req: schemas.SemanticSearchRequest,
+    current_user: database.User = Depends(auth.get_current_user),
+):
+    """Search persons using semantic similarity."""
+    from . import embedding_service
+
+    # Generate embedding for the search query
+    query_embedding = embedding_service.generate_text_embedding(search_req.query)
+
+    # Search pgvector for similar persons
+    matches = vector_db.semantic_search(
+        user_id=str(current_user.id),
+        query_embedding=query_embedding,
+        limit=search_req.limit,
+    )
+
+    # Enrich with full Neo4j data
+    results = []
+    for match in matches:
+        person = graph_db.get_person_node(match["person_id"])
+        if person:
+            results.append({
+                **person,
+                "similarity_score": match["similarity_score"],
+            })
+
+    return results

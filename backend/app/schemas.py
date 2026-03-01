@@ -123,3 +123,9 @@ class PersonIdentityResponse(PersonIdentityBase):
     @field_serializer('id', 'user_id', when_used='json')
     def serialize_ids(self, value):
         return str(value)
+
+
+class SemanticSearchRequest(BaseModel):
+    """Schema for semantic search."""
+    query: str = Field(..., min_length=1, description="Natural language search query")
+    limit: int = Field(default=5, ge=1, le=20, description="Max results to return")

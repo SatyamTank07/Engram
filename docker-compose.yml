@@ -2,7 +2,7 @@ name: engram
 
 services:
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     ports:
       - "5432:5432"
     environment:
@@ -52,7 +52,8 @@ services:
       test: [ "CMD-SHELL", "cypher-shell -u neo4j -p engram_graph 'RETURN 1'" ]
       interval: 10s
       timeout: 10s
-      retries: 5
+      retries: 10
+      start_period: 30s
 
 volumes:
   postgres_data:
