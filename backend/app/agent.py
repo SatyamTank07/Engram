@@ -26,7 +26,7 @@ try:
         delete_person_tool,
         search_person_tool,
         add_relationship_tool,
-        get_relationships_tool
+        get_relationships_tool,
     )
     MCP_TOOLS_AVAILABLE = True
 except ImportError:
@@ -60,6 +60,12 @@ AVAILABLE TOOLS:
 - `delete_person`: Use this only if the user explicitly asks to "forget" someone.
 - `add_relationship`: Use this to record how two people are connected. Relationship types include: KNOWS, FRIEND, FAMILY, COLLEAGUE, WORKS_WITH, MANAGES, REPORTS_TO, MENTOR, PARTNER, NEIGHBOR, CLASSMATE.
 - `get_relationships`: Use this to see all connections a person has.
+When a user uploads a photo in chat, face recognition is handled automatically by the system.
+The results will appear in the message as [FACE_MATCH_CONTEXT]. Use those results to answer naturally — tell the user who was recognized, with what confidence, and any known details about that person.
+
+SHOWING PERSON PHOTOS:
+When tool results include a `face_image_url` field for a person, show their photo in your response using markdown: ![Name](FACE_IMAGE_URL)
+Example: if face_image_url is "/uploads/faces/abc.jpg", write ![John](/uploads/faces/abc.jpg)
 
 Maintain a professional yet friendly tone. If you are unsure about a piece of information, ask for clarification before storing it."""
 
@@ -235,19 +241,23 @@ def format_chat_history(messages: list[dict]) -> list:
     return formatted
 
 
-def get_agent_response(user_message: str, chat_history: list[dict] = None) -> str:
+def get_agent_response(user_message: str, chat_history: list[dict] = None, face_context: str | None = None) -> str:
     """
     Get a response from the AI agent.
-    
+
     Args:
         user_message: The user's input message
         chat_history: List of previous messages [{"role": "user"|"assistant", "content": "..."}]
-    
+        face_context: Optional face recognition results to prepend to the message
+
     Returns:
         The AI's response as a string
     """
     if chat_history is None:
         chat_history = []
+
+    if face_context:
+        user_message = f"[FACE_MATCH_CONTEXT]\n{face_context}\n[/FACE_MATCH_CONTEXT]\n\n{user_message}"
     
     try:
         llm = get_llm()
@@ -263,7 +273,7 @@ def get_agent_response(user_message: str, chat_history: list[dict] = None) -> st
                 delete_person,
                 search_person,
                 add_relationship,
-                get_relationships
+                get_relationships,
             ]
         
         # Bind tools if available

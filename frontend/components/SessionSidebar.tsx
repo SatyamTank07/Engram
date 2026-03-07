@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { Session, getSessions, createSession, deleteSession } from '@/lib/api';
 
 interface SessionSidebarProps {
@@ -73,10 +74,17 @@ export default function SessionSidebar({
         <div className="w-64 bg-gray-50 border-r border-gray-200 p-4 flex flex-col h-screen">
             <button
                 onClick={handleNewChat}
-                className="w-full bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded-md mb-4 transition-colors"
+                className="w-full bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded-md mb-2 transition-colors"
             >
                 ➕ New Chat
             </button>
+
+            <Link
+                href="/persons"
+                className="w-full block text-center bg-gray-100 hover:bg-gray-200 text-gray-700 py-2 px-4 rounded-md mb-4 transition-colors"
+            >
+                👥 People
+            </Link>
 
             <div className="flex-1 overflow-y-auto space-y-2">
                 {sessions.length === 0 ? (

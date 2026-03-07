@@ -151,6 +151,7 @@ def update_person_node(
     contacts: dict | None = None,
     short_bio: str | None = None,
     trust_score: float | None = None,
+    face_image_url: str | None = None,
 ) -> dict | None:
     """Update fields on an existing Person node."""
     driver = _get_driver()
@@ -177,6 +178,9 @@ def update_person_node(
     if trust_score is not None:
         set_parts.append("p.trust_score = $trust_score")
         params["trust_score"] = str(trust_score)
+    if face_image_url is not None:
+        set_parts.append("p.face_image_url = $face_image_url")
+        params["face_image_url"] = face_image_url
 
     set_clause = ", ".join(set_parts)
 

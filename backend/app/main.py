@@ -2,12 +2,22 @@
 FastAPI main application with chat endpoints.
 """
 
-from fastapi import FastAPI, Depends, HTTPException, status
+import os
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from . import crud, schemas, database, agent, auth, graph_db, vector_db
+from . import crud, schemas, database, agent, auth, graph_db, vector_db, face_service
+
+# Ensure upload directories exist
+UPLOAD_DIR = Path(__file__).parent.parent / "uploads"
+(UPLOAD_DIR / "chat").mkdir(parents=True, exist_ok=True)
+(UPLOAD_DIR / "faces").mkdir(parents=True, exist_ok=True)
 
 # Initialize database
 database.init_db()
@@ -32,6 +42,9 @@ app = FastAPI(
     description="FastAPI backend for chat application with LangChain",
     version="1.0.0"
 )
+
+# Serve uploaded images
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 # CORS middleware for Next.js frontend
 app.add_middleware(
@@ -207,7 +220,8 @@ def chat(
         db,
         chat_request.session_id,
         "user",
-        chat_request.message
+        chat_request.message,
+        image_url=chat_request.image_url,
     )
     
     # Update session title if this is the first message
@@ -219,7 +233,7 @@ def chat(
     
     try:
         # Get AI response
-        ai_response = agent.get_agent_response(chat_request.message, chat_history)
+        ai_response = agent.get_agent_response(chat_request.message, chat_history, chat_request.face_context)
         
         # Save assistant message
         assistant_message = crud.save_message(
@@ -238,6 +252,25 @@ def chat(
     except Exception as e:
         # If AI fails, still return user message but with error
         raise HTTPException(status_code=500, detail=str(e))
+
+# Image upload endpoint
+
+@app.post("/api/upload")
+async def upload_image(
+    file: UploadFile = File(...),
+    current_user: database.User = Depends(auth.get_current_user),
+):
+    """Upload an image and return its URL."""
+    ext = Path(file.filename or "image.jpg").suffix or ".jpg"
+    filename = f"{uuid.uuid4()}{ext}"
+    filepath = UPLOAD_DIR / "chat" / filename
+
+    contents = await file.read()
+    with open(filepath, "wb") as f:
+        f.write(contents)
+
+    return {"url": f"/uploads/chat/{filename}"}
+
 
 # PersonIdentity endpoints (powered by Neo4j Knowledge Graph)
 
@@ -353,3 +386,54 @@ def semantic_search_persons(
             })
 
     return results
+
+
+@app.post("/api/persons/identify")
+async def identify_person_from_face(
+    file: UploadFile = File(...),
+    current_user: database.User = Depends(auth.get_current_user),
+):
+    """Upload an unknown face photo — returns top matching persons with confidence scores."""
+    image_bytes = await file.read()
+    face_vector = face_service.generate_face_embedding(image_bytes)
+    matches = vector_db.face_search(str(current_user.id), face_vector, limit=3)
+
+    results = []
+    for match in matches:
+        person = graph_db.get_person_node(match["person_id"])
+        if person:
+            results.append({**person, "confidence_score": match["similarity_score"]})
+
+    return results
+
+
+@app.post("/api/persons/{person_id}/face")
+async def upload_person_face(
+    person_id: str,
+    file: UploadFile = File(...),
+    current_user: database.User = Depends(auth.get_current_user),
+):
+    """Upload a face photo for a known person. Stores CLIP embedding in pgvector and saves the image."""
+    person = graph_db.get_person_node(person_id)
+    if not person or person.get("user_id") != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Person not found")
+
+    image_bytes = await file.read()
+
+    # Save image file
+    ext = Path(file.filename or "face.jpg").suffix or ".jpg"
+    filename = f"{person_id}{ext}"
+    filepath = UPLOAD_DIR / "faces" / filename
+    with open(filepath, "wb") as f:
+        f.write(image_bytes)
+
+    face_image_url = f"/uploads/faces/{filename}"
+
+    # Store embedding
+    face_vector = face_service.generate_face_embedding(image_bytes)
+    vector_db.upsert_face_embedding(person_id, str(current_user.id), face_vector)
+
+    # Save image URL on the person node
+    graph_db.update_person_node(person_id, face_image_url=face_image_url)
+
+    return {"message": "Face embedding stored", "person_id": person_id, "face_image_url": face_image_url}

@@ -69,6 +69,13 @@ def init_vector_db():
                 USING hnsw (text_embedding vector_cosine_ops);
             """)
 
+            # HNSW index for fast cosine similarity search on face embeddings
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_face_embedding
+                ON person_embeddings
+                USING hnsw (face_embedding vector_cosine_ops);
+            """)
+
             # Index for fast user_id filtering
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_emb_user_id
@@ -114,6 +121,72 @@ def upsert_text_embedding(
                 ),
             )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def upsert_face_embedding(person_id: str, user_id: str, face_vector: list[float]):
+    """
+    Store or update the face embedding for a person.
+    Only updates the face_embedding column — text_embedding is untouched.
+    Creates a row if none exists yet (person may not have a text embedding yet).
+    """
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO person_embeddings
+                    (id, person_id, user_id, face_embedding, updated_at)
+                VALUES
+                    (%s, %s, %s, %s::vector, NOW())
+                ON CONFLICT (person_id) DO UPDATE SET
+                    face_embedding = EXCLUDED.face_embedding,
+                    updated_at = NOW()
+                """,
+                (str(uuid.uuid4()), person_id, user_id, str(face_vector)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def face_search(
+    user_id: str,
+    query_face_vector: list[float],
+    limit: int = 3,
+) -> list[dict]:
+    """
+    Find persons whose face_embedding is closest to a query image.
+    Only searches persons that have a face embedding stored (not NULL).
+
+    Returns a list of dicts with person_id and similarity_score
+    (0.0 to 1.0, higher = better match), sorted by similarity descending.
+    """
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    person_id,
+                    1 - (face_embedding <=> %s::vector) AS similarity_score
+                FROM person_embeddings
+                WHERE user_id = %s
+                  AND face_embedding IS NOT NULL
+                ORDER BY face_embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (str(query_face_vector), user_id, str(query_face_vector), limit),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "person_id": row["person_id"],
+                    "similarity_score": round(float(row["similarity_score"]), 4),
+                }
+                for row in rows
+            ]
     finally:
         conn.close()
 
