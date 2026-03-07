@@ -47,6 +47,7 @@ class MessageResponse(BaseModel):
     session_id: str | UUID
     role: str
     content: str
+    image_url: str | None = None
     timestamp: datetime
 
     @field_serializer('id', 'session_id', when_used='json')
@@ -76,6 +77,7 @@ class ChatRequest(BaseModel):
     """Schema for chat request."""
     session_id: str | UUID
     message: str
+    image_url: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -129,3 +131,11 @@ class SemanticSearchRequest(BaseModel):
     """Schema for semantic search."""
     query: str = Field(..., min_length=1, description="Natural language search query")
     limit: int = Field(default=5, ge=1, le=20, description="Max results to return")
+
+
+class FaceIdentifyResult(BaseModel):
+    """Single result from face identification — person data + confidence score."""
+    id: str
+    name: str
+    short_bio: str | None = None
+    confidence_score: float  # 0.0 to 1.0, higher = better match

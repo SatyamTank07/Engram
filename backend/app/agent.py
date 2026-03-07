@@ -26,7 +26,9 @@ try:
         delete_person_tool,
         search_person_tool,
         add_relationship_tool,
-        get_relationships_tool
+        get_relationships_tool,
+        store_person_face_tool,
+        identify_face_from_url_tool,
     )
     MCP_TOOLS_AVAILABLE = True
 except ImportError:
@@ -60,6 +62,33 @@ AVAILABLE TOOLS:
 - `delete_person`: Use this only if the user explicitly asks to "forget" someone.
 - `add_relationship`: Use this to record how two people are connected. Relationship types include: KNOWS, FRIEND, FAMILY, COLLEAGUE, WORKS_WITH, MANAGES, REPORTS_TO, MENTOR, PARTNER, NEIGHBOR, CLASSMATE.
 - `get_relationships`: Use this to see all connections a person has.
+PHOTO HANDLING:
+When a user sends a message with an image (you'll see an image_url like /uploads/chat/uuid.jpg), YOU decide what to do based on intent:
+
+A) "Who is this?" / identification intent:
+   1. Call `identify_face` with the image_url
+   2. Report results naturally — who was recognized, confidence, known details
+   3. If no match found, tell the user the person is not in the database yet
+
+B) "This is Rahul, remember him" / save intent:
+   1. Call `search_person` to check if person already exists by name/text
+   2. Call `identify_face` to check if the face already matches someone
+   3. Based on results:
+      - Neither found → `create_person` then `store_person_face` with person_id + image_url
+      - Text found, no face stored → `store_person_face` to add face to existing person
+      - Face matches a different person → ASK the user for confirmation before updating
+      - Both match the same person → tell user they're already saved, update if new info provided
+   4. Always confirm to the user what was done
+
+C) Random photo / no face intent:
+   - Do NOT call any face tools. Just respond normally.
+
+- `identify_face`: Detect and identify faces in an uploaded image. Pass the image_url. Returns per-face results with matches.
+- `store_person_face`: Link an uploaded image's face to a person. Requires person_id and image_url.
+
+SHOWING PERSON PHOTOS:
+When tool results include a `face_image_url` field for a person, show their photo in your response using markdown: ![Name](FACE_IMAGE_URL)
+Example: if face_image_url is "/uploads/faces/abc.jpg", write ![John](/uploads/faces/abc.jpg)
 
 Maintain a professional yet friendly tone. If you are unsure about a piece of information, ask for clarification before storing it."""
 
@@ -187,6 +216,25 @@ def get_relationships(person_name: str) -> dict:
     return get_relationships_tool(person_name)
 
 
+class IdentifyFaceInput(BaseModel):
+    image_url: str = Field(..., description="URL path of the uploaded image (e.g. /uploads/chat/uuid.jpg)")
+
+@tool(args_schema=IdentifyFaceInput)
+def identify_face(image_url: str) -> dict:
+    """Detect and identify all faces in an uploaded image. Returns per-face results with bounding boxes, detection scores, and matched persons with confidence scores."""
+    return identify_face_from_url_tool(image_url)
+
+
+class StorePersonFaceInput(BaseModel):
+    person_id: str = Field(..., description="UUID of the person to link the face to")
+    image_url: str = Field(..., description="URL path of the uploaded chat image (e.g. /uploads/chat/uuid.jpg)")
+
+@tool(args_schema=StorePersonFaceInput)
+def store_person_face(person_id: str, image_url: str) -> dict:
+    """Store a face embedding for a person from an uploaded chat image. Call this after creating or finding a person when the user wants to link their face from an uploaded photo."""
+    return store_person_face_tool(person_id, image_url)
+
+
 def _get_openai_llm():
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -235,19 +283,23 @@ def format_chat_history(messages: list[dict]) -> list:
     return formatted
 
 
-def get_agent_response(user_message: str, chat_history: list[dict] = None) -> str:
+def get_agent_response(user_message: str, chat_history: list[dict] = None, image_url: str | None = None) -> str:
     """
     Get a response from the AI agent.
-    
+
     Args:
         user_message: The user's input message
         chat_history: List of previous messages [{"role": "user"|"assistant", "content": "..."}]
-    
+        image_url: Optional URL of an uploaded image attached to this message
+
     Returns:
         The AI's response as a string
     """
     if chat_history is None:
         chat_history = []
+
+    if image_url:
+        user_message = f"[ATTACHED_IMAGE]\nImage URL: {image_url}\n[/ATTACHED_IMAGE]\n\n{user_message}"
     
     try:
         llm = get_llm()
@@ -263,7 +315,9 @@ def get_agent_response(user_message: str, chat_history: list[dict] = None) -> st
                 delete_person,
                 search_person,
                 add_relationship,
-                get_relationships
+                get_relationships,
+                identify_face,
+                store_person_face,
             ]
         
         # Bind tools if available

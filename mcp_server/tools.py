@@ -5,12 +5,13 @@ Each tool corresponds to a graph database operation.
 
 import os
 import sys
+import shutil
 from pathlib import Path
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from backend.app import graph_db
+from backend.app import graph_db, face_service
 from backend.app import embedding_service, vector_db
 
 # For MVP: Hard-coded user ID (you'll need to replace this with actual user ID from your database)
@@ -66,6 +67,132 @@ def create_person_tool(
             "success": False,
             "message": f"Error creating person: {str(e)}",
         }
+
+
+def identify_face_tool(image_base64: str) -> dict:
+    """
+    Identify persons from a base64-encoded image (supports group photos).
+    Returns per-face results with bounding boxes and confidence scores.
+    """
+    try:
+        image_bytes = base64.b64decode(image_base64)
+        result = face_service.identify_faces_in_image(image_bytes, DEFAULT_USER_ID)
+        return {"success": True, **result}
+    except Exception as e:
+        return {"success": False, "message": f"Error identifying face: {str(e)}"}
+
+
+def _resolve_image_path(image_url: str) -> Path:
+    """Resolve an image URL like /uploads/chat/abc.jpg to an absolute file path."""
+    upload_dir = Path(__file__).parent.parent / "backend" / "uploads"
+    relative_path = image_url.lstrip("/")
+    if relative_path.startswith("uploads/"):
+        relative_path = relative_path[len("uploads/"):]
+    return upload_dir / relative_path
+
+
+def identify_face_from_url_tool(image_url: str) -> dict:
+    """
+    Detect and identify faces in an already-uploaded image.
+
+    Call this when the user uploads a photo and you need to know who is in it.
+    The image_url is the path from the chat message (e.g. /uploads/chat/uuid.jpg).
+
+    Args:
+        image_url: URL path of the uploaded image
+
+    Returns:
+        Dictionary with faces_detected count and per-face results including
+        bounding boxes, detection scores, match status, and matched persons.
+    """
+    try:
+        source_path = _resolve_image_path(image_url)
+        if not source_path.exists():
+            return {"success": False, "message": f"Image file not found: {image_url}"}
+
+        image_bytes = source_path.read_bytes()
+        detected_faces = face_service.detect_and_embed_all_faces(image_bytes)
+
+        if not detected_faces:
+            return {"success": True, "faces_detected": 0, "faces": [], "message": "No faces detected in the image"}
+
+        faces_result = []
+        for idx, face_data in enumerate(detected_faces):
+            matches = vector_db.face_search(DEFAULT_USER_ID, face_data["embedding"], limit=3)
+
+            face_matches = []
+            for match in matches:
+                person = graph_db.get_person_node(match["person_id"])
+                if person:
+                    face_matches.append({
+                        **person,
+                        "confidence_score": round(match["similarity_score"], 3),
+                    })
+
+            faces_result.append({
+                "face_index": idx,
+                "bbox": face_data["bbox"],
+                "det_score": face_data["det_score"],
+                "match_status": "matched" if face_matches else "unknown",
+                "matches": face_matches,
+            })
+
+        return {"success": True, "faces_detected": len(detected_faces), "faces": faces_result}
+    except Exception as e:
+        return {"success": False, "message": f"Error identifying faces: {str(e)}"}
+
+
+def store_person_face_tool(person_id: str, image_url: str) -> dict:
+    """
+    Store a face embedding for a person from an already-uploaded chat image.
+
+    Call this after create_person or search_person when the user uploads a photo
+    and wants to link it to a person. The image_url comes from the chat context
+    (e.g. /uploads/chat/abc.jpg).
+
+    Args:
+        person_id: UUID of the person to link the face to
+        image_url: URL path of the uploaded image (e.g. /uploads/chat/uuid.jpg)
+
+    Returns:
+        Dictionary with success status and face_image_url
+    """
+    try:
+        source_path = _resolve_image_path(image_url)
+        if not source_path.exists():
+            return {"success": False, "message": f"Image file not found: {image_url}"}
+
+        image_bytes = source_path.read_bytes()
+
+        # Extract face embedding
+        face_vector = face_service.generate_face_embedding(image_bytes)
+
+        # Store embedding in pgvector
+        vector_db.upsert_face_embedding(person_id, DEFAULT_USER_ID, face_vector)
+
+        # Copy image to faces directory
+        upload_dir = Path(__file__).parent.parent / "backend" / "uploads"
+        ext = source_path.suffix or ".jpg"
+        face_filename = f"{person_id}{ext}"
+        faces_dir = upload_dir / "faces"
+        faces_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = faces_dir / face_filename
+        shutil.copy2(str(source_path), str(dest_path))
+
+        face_image_url = f"/uploads/faces/{face_filename}"
+
+        # Update Neo4j node with face image URL
+        graph_db.update_person_node(person_id, face_image_url=face_image_url)
+
+        return {
+            "success": True,
+            "message": f"Face embedding stored and image linked to person {person_id}",
+            "face_image_url": face_image_url,
+        }
+    except ValueError as e:
+        return {"success": False, "message": f"Face detection failed: {str(e)}"}
+    except Exception as e:
+        return {"success": False, "message": f"Error storing face: {str(e)}"}
 
 
 def get_person_tool(person_id: str) -> dict:

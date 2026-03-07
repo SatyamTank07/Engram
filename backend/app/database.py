@@ -50,8 +50,9 @@ class ChatMessage(Base):
     session_id = Column(UUID(as_uuid=True), ForeignKey("chat_sessions.id"), nullable=False)
     role = Column(String(20), nullable=False)  # 'user' or 'assistant'
     content = Column(Text, nullable=False)
+    image_url = Column(String(512), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
-    
+
     session = relationship("ChatSession", back_populates="messages")
 
 

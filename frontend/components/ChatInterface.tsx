@@ -4,6 +4,8 @@ import { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Message, getSessionMessages, sendMessage } from '@/lib/api';
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 interface ChatInterfaceProps {
     sessionId: number | null;
 }
@@ -12,7 +14,9 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
+    const [attachedImage, setAttachedImage] = useState<File | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const imageInputRef = useRef<HTMLInputElement>(null);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -47,18 +51,49 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
         if (!input.trim() || !sessionId || loading) return;
 
         const userMessage = input.trim();
+        const imageFile = attachedImage;
+
+        // Create a local preview URL for the image (if any) before clearing state
+        const localImageUrl = imageFile ? URL.createObjectURL(imageFile) : null;
+
         setInput('');
+        setAttachedImage(null);
         setLoading(true);
 
+        // Optimistic: show user message immediately
+        const tempUserMessage: Message = {
+            id: Date.now(),
+            session_id: sessionId,
+            role: 'user',
+            content: userMessage,
+            image_url: localImageUrl,
+            timestamp: new Date().toISOString(),
+        };
+        setMessages(prev => [...prev, tempUserMessage]);
+
         try {
-            const response = await sendMessage(sessionId, userMessage);
-            setMessages([...messages, response.user_message, response.assistant_message]);
+            const response = await sendMessage(sessionId, userMessage, imageFile || undefined);
+            // Replace temp message with real one + add assistant response
+            setMessages(prev => [
+                ...prev.filter(m => m.id !== tempUserMessage.id),
+                response.user_message,
+                response.assistant_message,
+            ]);
         } catch (error) {
             console.error('Failed to send message:', error);
-            const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
-            console.error(`Failed to send message: ${errorMessage}`);
+            // Keep the user message visible but mark as failed
+            const errorMsg: Message = {
+                id: Date.now() + 1,
+                session_id: sessionId,
+                role: 'assistant',
+                content: 'Sorry, something went wrong. Please try again.',
+                image_url: null,
+                timestamp: new Date().toISOString(),
+            };
+            setMessages(prev => [...prev, errorMsg]);
         } finally {
             setLoading(false);
+            if (localImageUrl) URL.revokeObjectURL(localImageUrl);
         }
     };
 
@@ -88,6 +123,13 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                                 : 'bg-gray-100 text-gray-900 border border-gray-200'
                                 }`}
                         >
+                            {message.image_url && (
+                                <img
+                                    src={message.image_url.startsWith('blob:') ? message.image_url : `${API_BASE_URL}${message.image_url}`}
+                                    alt="Attached"
+                                    className="max-w-[240px] rounded-md mb-2"
+                                />
+                            )}
                             {message.role === 'assistant' ? (
                                 <div className="prose prose-sm max-w-none">
                                     <ReactMarkdown
@@ -98,6 +140,13 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                                             li: ({ children }) => <li className="ml-1">{children}</li>,
                                             strong: ({ children }) => <strong className="font-bold">{children}</strong>,
                                             em: ({ children }) => <em className="italic">{children}</em>,
+                                            img: ({ src, alt }) => (
+                                                <img
+                                                    src={typeof src === 'string' && src.startsWith('/') ? `${API_BASE_URL}${src}` : String(src ?? '')}
+                                                    alt={alt || ''}
+                                                    className="max-w-[200px] rounded-lg my-2"
+                                                />
+                                            ),
                                             code: ({ children }) => (
                                                 <code className="bg-gray-200 px-1 py-0.5 rounded text-sm font-mono">
                                                     {children}
@@ -137,12 +186,50 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
 
             {/* Input area */}
             <div className="border-t border-gray-200 p-4">
+                {attachedImage && (
+                    <div className="flex items-center gap-3 mb-2 px-1">
+                        <img
+                            src={URL.createObjectURL(attachedImage)}
+                            alt="Preview"
+                            className="h-16 w-16 object-cover rounded-md border border-gray-200"
+                        />
+                        <span className="text-xs text-gray-500 truncate max-w-[200px]">
+                            {attachedImage.name}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => setAttachedImage(null)}
+                            className="text-xs text-red-400 hover:text-red-600"
+                        >
+                            Remove
+                        </button>
+                    </div>
+                )}
                 <form onSubmit={handleSend} className="flex space-x-2">
+                    <button
+                        type="button"
+                        onClick={() => imageInputRef.current?.click()}
+                        disabled={loading}
+                        className="px-3 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors text-gray-500"
+                        title="Attach a photo for face identification"
+                    >
+                        📷
+                    </button>
+                    <input
+                        ref={imageInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                            if (e.target.files?.[0]) setAttachedImage(e.target.files[0]);
+                            e.target.value = '';
+                        }}
+                    />
                     <input
                         type="text"
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
-                        placeholder="Type your message here..."
+                        placeholder={attachedImage ? "Ask about this photo..." : "Type your message here..."}
                         disabled={loading}
                         className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 text-gray-900"
                     />
