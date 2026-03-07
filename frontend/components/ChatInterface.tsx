@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Message, getSessionMessages, sendMessage } from '@/lib/api';
+import { Message, getSessionMessages, sendMessage, validateImageFile } from '@/lib/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -15,6 +15,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
     const [attachedImage, setAttachedImage] = useState<File | null>(null);
+    const [imageError, setImageError] = useState('');
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
 
@@ -45,6 +46,16 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
         }
     };
 
+    const handleImageSelect = (file: File) => {
+        setImageError('');
+        try {
+            validateImageFile(file);
+            setAttachedImage(file);
+        } catch (err: any) {
+            setImageError(err.message);
+        }
+    };
+
     const handleSend = async (e: React.FormEvent) => {
         e.preventDefault();
 
@@ -58,6 +69,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
 
         setInput('');
         setAttachedImage(null);
+        setImageError('');
         setLoading(true);
 
         // Optimistic: show user message immediately
@@ -186,6 +198,9 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
 
             {/* Input area */}
             <div className="border-t border-gray-200 p-4">
+                {imageError && (
+                    <div className="mb-2 px-1 text-xs text-red-500">{imageError}</div>
+                )}
                 {attachedImage && (
                     <div className="flex items-center gap-3 mb-2 px-1">
                         <img
@@ -198,7 +213,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                         </span>
                         <button
                             type="button"
-                            onClick={() => setAttachedImage(null)}
+                            onClick={() => { setAttachedImage(null); setImageError(''); }}
                             className="text-xs text-red-400 hover:text-red-600"
                         >
                             Remove
@@ -218,10 +233,10 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                     <input
                         ref={imageInputRef}
                         type="file"
-                        accept="image/*"
+                        accept="image/jpeg,image/png,image/webp"
                         className="hidden"
                         onChange={(e) => {
-                            if (e.target.files?.[0]) setAttachedImage(e.target.files[0]);
+                            if (e.target.files?.[0]) handleImageSelect(e.target.files[0]);
                             e.target.value = '';
                         }}
                     />

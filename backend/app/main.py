@@ -6,13 +6,22 @@ import os
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Request, Response, status, UploadFile, File
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from . import crud, schemas, database, agent, auth, graph_db, vector_db, face_service
+
+# File upload constraints
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+CHUNK_SIZE = 1024 * 1024  # 1MB
 
 # Ensure upload directories exist
 UPLOAD_DIR = Path(__file__).parent.parent / "uploads"
@@ -43,6 +52,11 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Initialize rate limiter
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Serve uploaded images
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
@@ -65,7 +79,9 @@ def read_root():
 # Authentication endpoints
 
 @app.post("/api/auth/register", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("5/minute")
 def register(
+    request: Request,
     user_data: schemas.RegisterRequest,
     db: Session = Depends(database.get_db)
 ):
@@ -89,32 +105,28 @@ def register(
 
 
 @app.post("/api/auth/login", response_model=schemas.LoginResponse)
+@limiter.limit("5/minute")
 def login(
+    request: Request,
     login_data: schemas.LoginRequest,
-    db: Session = Depends(database.get_db)
+    response: Response,
+    db: Session = Depends(database.get_db),
 ):
-    """Login with phone and password."""
-    # Get user
+    """Login with phone and password. Tokens set via httpOnly cookies."""
     user = crud.get_user_by_phone(db, login_data.phone)
-    if not user:
+    if not user or not auth.verify_password(login_data.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials"
+            detail="Invalid credentials",
         )
-    
-    # Verify password
-    if not auth.verify_password(login_data.password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials"
-        )
-    
-    # Create access token (sub must be a string)
+
     access_token = auth.create_access_token(data={"sub": str(user.id)})
-    
+    refresh_token = auth.create_refresh_token(db, user.id)
+    auth.set_auth_cookies(response, access_token, refresh_token)
+
     return schemas.LoginResponse(
-        access_token=access_token,
-        user=user
+        expires_in=auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=user,
     )
 
 
@@ -124,6 +136,53 @@ def get_current_user_info(
 ):
     """Get current authenticated user."""
     return current_user
+
+
+@app.post("/api/auth/refresh", response_model=schemas.RefreshResponse)
+def refresh_token(
+    request: Request,
+    response: Response,
+    db: Session = Depends(database.get_db),
+):
+    """Refresh the access token using the refresh-token cookie."""
+    old_refresh = request.cookies.get(auth.REFRESH_COOKIE)
+    old_access = request.cookies.get(auth.ACCESS_COOKIE)
+    if not old_refresh or not old_access:
+        raise HTTPException(status_code=401, detail="Missing auth cookies")
+
+    # Decode expired access token to get user_id (signature still verified)
+    payload = auth.decode_access_token_no_expiry(old_access)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Verify + rotate refresh token
+    auth.verify_refresh_token(db, old_refresh, user_id)
+    new_access = auth.create_access_token(data={"sub": user_id})
+    new_refresh = auth.create_refresh_token(db, user_id)  # rotation
+    auth.set_auth_cookies(response, new_access, new_refresh)
+
+    return schemas.RefreshResponse(expires_in=auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+
+
+@app.post("/api/auth/logout")
+def logout(
+    request: Request,
+    response: Response,
+    db: Session = Depends(database.get_db),
+):
+    """Logout — revoke refresh token and clear cookies."""
+    access_token = request.cookies.get(auth.ACCESS_COOKIE)
+    if access_token:
+        try:
+            payload = auth.decode_access_token_no_expiry(access_token)
+            user_id = payload.get("sub")
+            if user_id:
+                auth.revoke_refresh_token(db, user_id)
+        except Exception:
+            pass  # best-effort revocation
+    auth.clear_auth_cookies(response)
+    return {"status": "logged out"}
 
 
 # Session endpoints
@@ -192,7 +251,9 @@ def delete_session(
 
 
 @app.post("/api/chat", response_model=schemas.ChatResponse)
+@limiter.limit("20/minute")
 def chat(
+    request: Request,
     chat_request: schemas.ChatRequest,
     current_user: database.User = Depends(auth.get_current_user),
     db: Session = Depends(database.get_db)
@@ -233,7 +294,10 @@ def chat(
     
     try:
         # Get AI response
-        ai_response = agent.get_agent_response(chat_request.message, chat_history, chat_request.image_url)
+        ai_response = agent.get_agent_response(
+            chat_request.message, chat_history, chat_request.image_url,
+            user_id=str(current_user.id),
+        )
         
         # Save assistant message
         assistant_message = crud.save_message(
@@ -261,13 +325,27 @@ async def upload_image(
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Upload an image and return its URL."""
+    if file.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type: {file.content_type}. Allowed types are: {', '.join(ALLOWED_IMAGE_TYPES)}"
+        )
+    
     ext = Path(file.filename or "image.jpg").suffix or ".jpg"
     filename = f"{uuid.uuid4()}{ext}"
     filepath = UPLOAD_DIR / "chat" / filename
 
-    contents = await file.read()
+    size = 0
     with open(filepath, "wb") as f:
-        f.write(contents)
+        while chunk := await file.read(CHUNK_SIZE):
+            size += len(chunk)
+            if size > MAX_UPLOAD_SIZE:
+                os.remove(filepath) # Clean up partial file
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024)}MB"
+                )
+            await run_in_threadpool(f.write, chunk)
 
     return {"url": f"/uploads/chat/{filename}"}
 
@@ -389,7 +467,9 @@ def semantic_search_persons(
 
 
 @app.post("/api/persons/identify")
+@limiter.limit("10/minute")
 async def identify_person_from_face(
+    request: Request,
     file: UploadFile = File(...),
     current_user: database.User = Depends(auth.get_current_user),
 ):
@@ -398,35 +478,67 @@ async def identify_person_from_face(
     against the database independently. Returns per-face results with
     bounding boxes and match info.
     """
-    image_bytes = await file.read()
-    return face_service.identify_faces_in_image(image_bytes, str(current_user.id))
+    if file.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type: {file.content_type}. Allowed types are: {', '.join(ALLOWED_IMAGE_TYPES)}"
+        )
+        
+    image_bytes = bytearray()
+    while chunk := await file.read(CHUNK_SIZE):
+        image_bytes.extend(chunk)
+        if len(image_bytes) > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024)}MB"
+            )
+
+    return await run_in_threadpool(face_service.identify_faces_in_image, bytes(image_bytes), str(current_user.id))
 
 
 @app.post("/api/persons/{person_id}/face")
+@limiter.limit("10/minute")
 async def upload_person_face(
+    request: Request,
     person_id: str,
     file: UploadFile = File(...),
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Upload a face photo for a known person. Detects face via InsightFace and stores ArcFace embedding in pgvector."""
+    
+    if file.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type: {file.content_type}. Allowed types are: {', '.join(ALLOWED_IMAGE_TYPES)}"
+        )
+
     person = graph_db.get_person_node(person_id)
     if not person or person.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=404, detail="Person not found")
 
-    image_bytes = await file.read()
-
-    # Save image file
     ext = Path(file.filename or "face.jpg").suffix or ".jpg"
     filename = f"{person_id}{ext}"
     filepath = UPLOAD_DIR / "faces" / filename
+
+    # Read and write securely
+    image_bytes = bytearray()
     with open(filepath, "wb") as f:
-        f.write(image_bytes)
+        while chunk := await file.read(CHUNK_SIZE):
+            image_bytes.extend(chunk)
+            if len(image_bytes) > MAX_UPLOAD_SIZE:
+                os.remove(filepath)
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024)}MB"
+                )
+            await run_in_threadpool(f.write, chunk)
+    final_image_bytes = bytes(image_bytes)
 
     face_image_url = f"/uploads/faces/{filename}"
 
-    # Store embedding
-    face_vector = face_service.generate_face_embedding(image_bytes)
-    vector_db.upsert_face_embedding(person_id, str(current_user.id), face_vector)
+    # Store embedding using the generated image bytes
+    face_vector = await run_in_threadpool(face_service.generate_face_embedding, final_image_bytes)
+    await run_in_threadpool(vector_db.upsert_face_embedding, person_id, str(current_user.id), face_vector)
 
     # Save image URL on the person node
     graph_db.update_person_node(person_id, face_image_url=face_image_url)

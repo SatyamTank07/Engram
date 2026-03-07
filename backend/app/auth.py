@@ -1,90 +1,201 @@
 """
-Authentication utilities for JWT tokens and password hashing.
+Authentication utilities for JWT tokens, password hashing,
+refresh-token encryption and httpOnly cookie management.
 """
 
 import os
+import secrets
 from datetime import datetime, timedelta
 from typing import Optional
+
+from cryptography.fernet import Fernet, InvalidToken
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from . import database
 
+# ---------------------------------------------------------------------------
 # Security configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
+# ---------------------------------------------------------------------------
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY environment variable is not set. Cannot start.")
+
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+ACCESS_TOKEN_EXPIRE_MINUTES = 60            # 1 hour
+REFRESH_TOKEN_EXPIRE_DAYS = 7               # 7 days
+
+# Fernet key for encrypting refresh tokens at rest
+TOKEN_ENCRYPTION_KEY = os.environ.get("TOKEN_ENCRYPTION_KEY")
+if not TOKEN_ENCRYPTION_KEY:
+    raise RuntimeError("TOKEN_ENCRYPTION_KEY environment variable is not set. Cannot start.")
+_fernet = Fernet(TOKEN_ENCRYPTION_KEY.encode())
+
+# Cookie settings
+COOKIE_DOMAIN = os.environ.get("COOKIE_DOMAIN", None)   # None = current host
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SAMESITE = "lax"
+ACCESS_COOKIE = "access_token"
+REFRESH_COOKIE = "refresh_token"
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# HTTP Bearer token scheme
-security = HTTPBearer()
+# HTTP Bearer (auto_error=False so cookie-based auth can also work)
+security = HTTPBearer(auto_error=False)
 
 
+# ---------------------------------------------------------------------------
+# Password helpers
+# ---------------------------------------------------------------------------
 def hash_password(password: str) -> str:
-    """Hash a password using bcrypt."""
     return pwd_context.hash(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash."""
     return pwd_context.verify(plain_password, hashed_password)
 
 
+# ---------------------------------------------------------------------------
+# Access token (short-lived stateless JWT)
+# ---------------------------------------------------------------------------
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Create a JWT access token."""
     to_encode = data.copy()
-    
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_access_token(token: str) -> dict:
-    """Decode and verify a JWT token."""
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except JWTError as e:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
         )
 
 
+def decode_access_token_no_expiry(token: str) -> dict:
+    """Decode JWT ignoring expiry — used during refresh to identify the user."""
+    try:
+        return jwt.decode(
+            token, SECRET_KEY, algorithms=[ALGORITHM],
+            options={"verify_exp": False},
+        )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Refresh token (long-lived, encrypted at rest in User row)
+# ---------------------------------------------------------------------------
+def create_refresh_token(db: Session, user_id) -> str:
+    """Generate a random refresh token, encrypt it, store on the User row."""
+    raw_token = secrets.token_urlsafe(64)
+    encrypted = _fernet.encrypt(raw_token.encode()).decode()
+    expires_at = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+
+    db.query(database.User).filter(database.User.id == user_id).update({
+        "refresh_token_encrypted": encrypted,
+        "refresh_token_expires_at": expires_at,
+    })
+    db.commit()
+    return raw_token
+
+
+def verify_refresh_token(db: Session, raw_token: str, user_id: str) -> database.User:
+    """Decrypt the stored refresh token and compare with the provided one."""
+    user = db.query(database.User).filter(database.User.id == user_id).first()
+    if not user or not user.refresh_token_encrypted:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    if user.refresh_token_expires_at and user.refresh_token_expires_at < datetime.utcnow():
+        raise HTTPException(status_code=401, detail="Refresh token expired")
+
+    try:
+        stored_token = _fernet.decrypt(user.refresh_token_encrypted.encode()).decode()
+    except InvalidToken:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    if not secrets.compare_digest(stored_token, raw_token):
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    return user
+
+
+def revoke_refresh_token(db: Session, user_id) -> None:
+    """Clear the refresh token on the User row (logout / revoke)."""
+    db.query(database.User).filter(database.User.id == user_id).update({
+        "refresh_token_encrypted": None,
+        "refresh_token_expires_at": None,
+    })
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Cookie helpers
+# ---------------------------------------------------------------------------
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
+    response.set_cookie(
+        key=ACCESS_COOKIE,
+        value=access_token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+        domain=COOKIE_DOMAIN,
+    )
+    response.set_cookie(
+        key=REFRESH_COOKIE,
+        value=refresh_token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        path="/api/auth",          # only sent to auth endpoints
+        domain=COOKIE_DOMAIN,
+    )
+
+
+def clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(key=ACCESS_COOKIE, path="/", domain=COOKIE_DOMAIN)
+    response.delete_cookie(key=REFRESH_COOKIE, path="/api/auth", domain=COOKIE_DOMAIN)
+
+
+# ---------------------------------------------------------------------------
+# FastAPI dependency — get current user from cookie OR Bearer header
+# ---------------------------------------------------------------------------
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(database.get_db)
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: Session = Depends(database.get_db),
 ) -> database.User:
-    """
-    Dependency to get current authenticated user from JWT token.
-    Use this in route dependencies to protect endpoints.
-    """
-    token = credentials.credentials
+    # 1. Try httpOnly cookie
+    token = request.cookies.get(ACCESS_COOKIE)
+    # 2. Fallback to Bearer header (for MCP / programmatic clients)
+    if not token and credentials:
+        token = credentials.credentials
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+
     payload = decode_access_token(token)
-    
     user_id: str = payload.get("sub")
     if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-        )
-    
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
     user = db.query(database.User).filter(database.User.id == user_id).first()
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
-    
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
     return user

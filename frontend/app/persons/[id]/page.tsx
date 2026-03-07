@@ -11,6 +11,7 @@ import {
     updatePerson,
     deletePerson,
     uploadPersonFace,
+    validateImageFile,
 } from '@/lib/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -31,6 +32,7 @@ export default function PersonDetailPage() {
     // Face upload
     const [faceFile, setFaceFile] = useState<File | null>(null);
     const [faceStatus, setFaceStatus] = useState<'idle' | 'uploading' | 'success' | 'error'>('idle');
+    const [faceError, setFaceError] = useState('');
     const faceInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
@@ -85,8 +87,20 @@ export default function PersonDetailPage() {
         }
     }
 
+    function handleFaceSelect(file: File) {
+        setFaceError('');
+        setFaceStatus('idle');
+        try {
+            validateImageFile(file);
+            setFaceFile(file);
+        } catch (err: any) {
+            setFaceError(err.message);
+        }
+    }
+
     async function handleFaceUpload() {
         if (!person || !faceFile) return;
+        setFaceError('');
         setFaceStatus('uploading');
         try {
             const result = await uploadPersonFace(person.id, faceFile);
@@ -95,8 +109,9 @@ export default function PersonDetailPage() {
             if (result.face_image_url) {
                 setPerson({ ...person, face_image_url: result.face_image_url });
             }
-        } catch {
+        } catch (err: any) {
             setFaceStatus('error');
+            setFaceError(err.message);
         }
     }
 
@@ -278,13 +293,11 @@ export default function PersonDetailPage() {
                         <input
                             ref={faceInputRef}
                             type="file"
-                            accept="image/*"
+                            accept="image/jpeg,image/png,image/webp"
                             className="hidden"
                             onChange={e => {
-                                if (e.target.files?.[0]) {
-                                    setFaceFile(e.target.files[0]);
-                                    setFaceStatus('idle');
-                                }
+                                if (e.target.files?.[0]) handleFaceSelect(e.target.files[0]);
+                                e.target.value = '';
                             }}
                         />
                         {faceFile && (
@@ -302,8 +315,12 @@ export default function PersonDetailPage() {
                         <p className="mt-3 text-sm text-green-600">✓ Face photo stored successfully.</p>
                     )}
                     {faceStatus === 'error' && (
-                        <p className="mt-3 text-sm text-red-500">✗ Upload failed. Please try again.</p>
+                        <p className="mt-3 text-sm text-red-500">✗ {faceError || 'Upload failed. Please try again.'}</p>
                     )}
+                    {faceStatus === 'idle' && faceError && (
+                        <p className="mt-3 text-sm text-red-500">{faceError}</p>
+                    )}
+                    <p className="mt-2 text-xs text-gray-400">JPEG, PNG, or WebP (max 10MB)</p>
                 </div>
 
             </div>

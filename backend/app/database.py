@@ -5,7 +5,7 @@ Database models and connection for FastAPI backend.
 import os
 import uuid
 from datetime import datetime
-from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -26,6 +26,9 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
+    refresh_token_encrypted = Column(Text, nullable=True)
+    refresh_token_expires_at = Column(DateTime, nullable=True)
+
     sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
 
 

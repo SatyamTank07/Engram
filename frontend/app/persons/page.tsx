@@ -12,6 +12,7 @@ import {
     createPerson,
     uploadPersonFace,
     identifyPersonFromFace,
+    validateImageFile,
 } from '@/lib/api';
 import FaceOverlay from '@/components/FaceOverlay';
 
@@ -45,6 +46,7 @@ export default function PersonsPage() {
 
     // Per-person face upload status
     const [faceUploadStatus, setFaceUploadStatus] = useState<Record<string, 'uploading' | 'done' | 'error'>>({});
+    const [faceUploadError, setFaceUploadError] = useState<Record<string, string>>({});
     const faceInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
     useEffect(() => {
@@ -83,6 +85,14 @@ export default function PersonsPage() {
     }
 
     async function handleFaceUpload(personId: string, file: File) {
+        try {
+            validateImageFile(file);
+        } catch (err: any) {
+            setFaceUploadError(s => ({ ...s, [personId]: err.message }));
+            setFaceUploadStatus(s => ({ ...s, [personId]: 'error' }));
+            return;
+        }
+        setFaceUploadError(s => ({ ...s, [personId]: '' }));
         setFaceUploadStatus(s => ({ ...s, [personId]: 'uploading' }));
         try {
             const result = await uploadPersonFace(personId, file);
@@ -92,17 +102,23 @@ export default function PersonsPage() {
                     p.id === personId ? { ...p, face_image_url: result.face_image_url! } : p
                 ));
             }
-        } catch {
+        } catch (err: any) {
             setFaceUploadStatus(s => ({ ...s, [personId]: 'error' }));
+            setFaceUploadError(s => ({ ...s, [personId]: err.message }));
         }
     }
 
     async function handleIdentify(file: File) {
-        setIdentifying(true);
         setIdentifyError('');
+        try {
+            validateImageFile(file);
+        } catch (err: any) {
+            setIdentifyError(err.message);
+            return;
+        }
+        setIdentifying(true);
         setIdentifyResults(null);
         setHighlightedFace(null);
-        // Create preview URL for the uploaded image
         const previewUrl = URL.createObjectURL(file);
         setIdentifyImageUrl(previewUrl);
         try {
@@ -208,12 +224,14 @@ export default function PersonsPage() {
                         ) : (
                             <p className="text-sm text-gray-500">
                                 Drop a photo here or <span className="text-blue-500">click to upload</span>
+                                <br />
+                                <span className="text-xs text-gray-400">JPEG, PNG, or WebP (max 10MB)</span>
                             </p>
                         )}
                         <input
                             ref={identifyInputRef}
                             type="file"
-                            accept="image/*"
+                            accept="image/jpeg,image/png,image/webp"
                             className="hidden"
                             onChange={e => { if (e.target.files?.[0]) handleIdentify(e.target.files[0]); }}
                         />
@@ -367,6 +385,7 @@ export default function PersonsPage() {
                         <div className="space-y-2">
                             {persons.map(person => {
                                 const uploadStatus = faceUploadStatus[person.id];
+                                const uploadError = faceUploadError[person.id];
                                 return (
                                     <div
                                         key={person.id}
@@ -385,15 +404,18 @@ export default function PersonsPage() {
                                                 </div>
                                             )}
                                             <div className="min-w-0">
-                                            <p className="text-sm font-medium text-gray-900">{person.name}</p>
-                                            {person.short_bio && (
-                                                <p className="text-xs text-gray-500 truncate">{person.short_bio}</p>
-                                            )}
-                                            {person.aliases.length > 0 && (
-                                                <p className="text-xs text-gray-400">
-                                                    aka {person.aliases.join(', ')}
-                                                </p>
-                                            )}
+                                                <p className="text-sm font-medium text-gray-900">{person.name}</p>
+                                                {person.short_bio && (
+                                                    <p className="text-xs text-gray-500 truncate">{person.short_bio}</p>
+                                                )}
+                                                {person.aliases.length > 0 && (
+                                                    <p className="text-xs text-gray-400">
+                                                        aka {person.aliases.join(', ')}
+                                                    </p>
+                                                )}
+                                                {uploadStatus === 'error' && uploadError && (
+                                                    <p className="text-xs text-red-500">{uploadError}</p>
+                                                )}
                                             </div>
                                         </div>
 
@@ -411,7 +433,7 @@ export default function PersonsPage() {
                                             </button>
                                             <input
                                                 type="file"
-                                                accept="image/*"
+                                                accept="image/jpeg,image/png,image/webp"
                                                 className="hidden"
                                                 ref={el => { faceInputRefs.current[person.id] = el; }}
                                                 onChange={e => {
