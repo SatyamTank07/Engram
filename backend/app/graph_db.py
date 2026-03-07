@@ -199,7 +199,7 @@ def update_person_node(
 
 def delete_person_node(person_id: str) -> bool:
     """Delete a Person node and all its relationships."""
-    # Delete embedding from pgvector first
+    # Delete embeddings from pgvector first
     try:
         from . import vector_db
         vector_db.delete_embedding(person_id)

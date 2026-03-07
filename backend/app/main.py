@@ -233,7 +233,7 @@ def chat(
     
     try:
         # Get AI response
-        ai_response = agent.get_agent_response(chat_request.message, chat_history, chat_request.face_context)
+        ai_response = agent.get_agent_response(chat_request.message, chat_history, chat_request.image_url)
         
         # Save assistant message
         assistant_message = crud.save_message(
@@ -393,18 +393,13 @@ async def identify_person_from_face(
     file: UploadFile = File(...),
     current_user: database.User = Depends(auth.get_current_user),
 ):
-    """Upload an unknown face photo — returns top matching persons with confidence scores."""
+    """
+    Upload a photo (single or group) — detects ALL faces and matches each
+    against the database independently. Returns per-face results with
+    bounding boxes and match info.
+    """
     image_bytes = await file.read()
-    face_vector = face_service.generate_face_embedding(image_bytes)
-    matches = vector_db.face_search(str(current_user.id), face_vector, limit=3)
-
-    results = []
-    for match in matches:
-        person = graph_db.get_person_node(match["person_id"])
-        if person:
-            results.append({**person, "confidence_score": match["similarity_score"]})
-
-    return results
+    return face_service.identify_faces_in_image(image_bytes, str(current_user.id))
 
 
 @app.post("/api/persons/{person_id}/face")
@@ -413,7 +408,7 @@ async def upload_person_face(
     file: UploadFile = File(...),
     current_user: database.User = Depends(auth.get_current_user),
 ):
-    """Upload a face photo for a known person. Stores CLIP embedding in pgvector and saves the image."""
+    """Upload a face photo for a known person. Detects face via InsightFace and stores ArcFace embedding in pgvector."""
     person = graph_db.get_person_node(person_id)
     if not person or person.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=404, detail="Person not found")

@@ -16,5 +16,6 @@ neo4j>=5.0
 openai>=1.0
 pgvector>=0.3.0
 numpy
-sentence-transformers
-Pillow
+insightface>=0.7
+onnxruntime
+opencv-python-headless

@@ -77,7 +77,6 @@ class ChatRequest(BaseModel):
     """Schema for chat request."""
     session_id: str | UUID
     message: str
-    face_context: str | None = None
     image_url: str | None = None
 
 

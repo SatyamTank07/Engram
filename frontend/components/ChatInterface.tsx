@@ -52,19 +52,48 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
 
         const userMessage = input.trim();
         const imageFile = attachedImage;
+
+        // Create a local preview URL for the image (if any) before clearing state
+        const localImageUrl = imageFile ? URL.createObjectURL(imageFile) : null;
+
         setInput('');
         setAttachedImage(null);
         setLoading(true);
 
+        // Optimistic: show user message immediately
+        const tempUserMessage: Message = {
+            id: Date.now(),
+            session_id: sessionId,
+            role: 'user',
+            content: userMessage,
+            image_url: localImageUrl,
+            timestamp: new Date().toISOString(),
+        };
+        setMessages(prev => [...prev, tempUserMessage]);
+
         try {
             const response = await sendMessage(sessionId, userMessage, imageFile || undefined);
-            setMessages([...messages, response.user_message, response.assistant_message]);
+            // Replace temp message with real one + add assistant response
+            setMessages(prev => [
+                ...prev.filter(m => m.id !== tempUserMessage.id),
+                response.user_message,
+                response.assistant_message,
+            ]);
         } catch (error) {
             console.error('Failed to send message:', error);
-            const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
-            console.error(`Failed to send message: ${errorMessage}`);
+            // Keep the user message visible but mark as failed
+            const errorMsg: Message = {
+                id: Date.now() + 1,
+                session_id: sessionId,
+                role: 'assistant',
+                content: 'Sorry, something went wrong. Please try again.',
+                image_url: null,
+                timestamp: new Date().toISOString(),
+            };
+            setMessages(prev => [...prev, errorMsg]);
         } finally {
             setLoading(false);
+            if (localImageUrl) URL.revokeObjectURL(localImageUrl);
         }
     };
 
@@ -96,7 +125,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                         >
                             {message.image_url && (
                                 <img
-                                    src={`${API_BASE_URL}${message.image_url}`}
+                                    src={message.image_url.startsWith('blob:') ? message.image_url : `${API_BASE_URL}${message.image_url}`}
                                     alt="Attached"
                                     className="max-w-[240px] rounded-md mb-2"
                                 />
@@ -113,7 +142,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                                             em: ({ children }) => <em className="italic">{children}</em>,
                                             img: ({ src, alt }) => (
                                                 <img
-                                                    src={src?.startsWith('/') ? `${API_BASE_URL}${src}` : src}
+                                                    src={typeof src === 'string' && src.startsWith('/') ? `${API_BASE_URL}${src}` : String(src ?? '')}
                                                     alt={alt || ''}
                                                     className="max-w-[200px] rounded-lg my-2"
                                                 />

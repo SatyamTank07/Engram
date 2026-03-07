@@ -7,12 +7,13 @@ import { isAuthenticated } from '@/lib/auth';
 import {
     Person,
     PersonCreate,
-    FaceMatch,
+    FaceIdentifyResponse,
     getPersons,
     createPerson,
     uploadPersonFace,
     identifyPersonFromFace,
 } from '@/lib/api';
+import FaceOverlay from '@/components/FaceOverlay';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -35,9 +36,11 @@ export default function PersonsPage() {
     const [creating, setCreating] = useState(false);
 
     // Face identification
-    const [identifyResults, setIdentifyResults] = useState<FaceMatch[] | null>(null);
+    const [identifyResults, setIdentifyResults] = useState<FaceIdentifyResponse | null>(null);
     const [identifying, setIdentifying] = useState(false);
     const [identifyError, setIdentifyError] = useState('');
+    const [identifyImageUrl, setIdentifyImageUrl] = useState<string | null>(null);
+    const [highlightedFace, setHighlightedFace] = useState<number | null>(null);
     const identifyInputRef = useRef<HTMLInputElement>(null);
 
     // Per-person face upload status
@@ -98,11 +101,16 @@ export default function PersonsPage() {
         setIdentifying(true);
         setIdentifyError('');
         setIdentifyResults(null);
+        setHighlightedFace(null);
+        // Create preview URL for the uploaded image
+        const previewUrl = URL.createObjectURL(file);
+        setIdentifyImageUrl(previewUrl);
         try {
             const results = await identifyPersonFromFace(file);
             setIdentifyResults(results);
         } catch {
             setIdentifyError('Failed to identify face. Make sure the backend is running and faces have been uploaded.');
+            setIdentifyImageUrl(null);
         } finally {
             setIdentifying(false);
         }
@@ -216,29 +224,127 @@ export default function PersonsPage() {
                     )}
 
                     {identifyResults !== null && (
-                        <div className="mt-4 space-y-2">
-                            {identifyResults.length === 0 ? (
-                                <p className="text-sm text-gray-500">No matching faces found.</p>
+                        <div className="mt-4 space-y-4">
+                            {identifyResults.faces_detected === 0 ? (
+                                <p className="text-sm text-gray-500">No faces detected in the image.</p>
                             ) : (
-                                identifyResults.map(match => {
-                                    const label = confidenceLabel(match.confidence_score);
-                                    return (
-                                        <div key={match.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
-                                            <div>
-                                                <p className="text-sm font-medium text-gray-900">{match.name}</p>
-                                                {match.short_bio && (
-                                                    <p className="text-xs text-gray-500 truncate max-w-xs">{match.short_bio}</p>
-                                                )}
-                                            </div>
-                                            <div className="text-right">
-                                                <p className={`text-sm font-semibold ${label.color}`}>
-                                                    {Math.round(match.confidence_score * 100)}%
-                                                </p>
-                                                <p className={`text-xs ${label.color}`}>{label.text}</p>
-                                            </div>
-                                        </div>
-                                    );
-                                })
+                                <>
+                                    {/* Summary */}
+                                    <div className="flex items-center gap-2 text-sm">
+                                        <span className="font-medium text-gray-700">
+                                            {identifyResults.faces_detected} face{identifyResults.faces_detected !== 1 ? 's' : ''} detected
+                                        </span>
+                                        <span className="text-gray-400">—</span>
+                                        <span className="text-green-600">
+                                            {identifyResults.faces.filter(f => f.match_status === 'matched').length} identified
+                                        </span>
+                                        <span className="text-yellow-600">
+                                            {identifyResults.faces.filter(f => f.match_status === 'unknown').length} unknown
+                                        </span>
+                                    </div>
+
+                                    {/* Image with bounding box overlay */}
+                                    {identifyImageUrl && (
+                                        <FaceOverlay
+                                            imageSrc={identifyImageUrl}
+                                            faces={identifyResults.faces}
+                                            highlightedFace={highlightedFace}
+                                            onFaceHover={setHighlightedFace}
+                                        />
+                                    )}
+
+                                    {/* Per-face result cards */}
+                                    <div className="space-y-2">
+                                        {identifyResults.faces.map(face => {
+                                            const isHighlighted = highlightedFace === face.face_index;
+                                            return (
+                                                <div
+                                                    key={face.face_index}
+                                                    onMouseEnter={() => setHighlightedFace(face.face_index)}
+                                                    onMouseLeave={() => setHighlightedFace(null)}
+                                                    className={`p-3 rounded-md border transition-all duration-150 ${
+                                                        isHighlighted
+                                                            ? 'border-blue-400 bg-blue-50 shadow-sm'
+                                                            : 'border-gray-200 bg-gray-50'
+                                                    }`}
+                                                >
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex items-center gap-2">
+                                                            <span
+                                                                className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold text-white ${
+                                                                    face.match_status === 'matched' ? 'bg-green-500' : 'bg-yellow-500'
+                                                                }`}
+                                                            >
+                                                                {face.face_index + 1}
+                                                            </span>
+                                                            {face.match_status === 'matched' && face.matches.length > 0 ? (
+                                                                <div>
+                                                                    <p className="text-sm font-medium text-gray-900">
+                                                                        {face.matches[0].name}
+                                                                    </p>
+                                                                    {face.matches[0].short_bio && (
+                                                                        <p className="text-xs text-gray-500 truncate max-w-xs">
+                                                                            {face.matches[0].short_bio}
+                                                                        </p>
+                                                                    )}
+                                                                </div>
+                                                            ) : (
+                                                                <p className="text-sm text-yellow-700 font-medium">Unknown person</p>
+                                                            )}
+                                                        </div>
+
+                                                        <div className="flex items-center gap-3">
+                                                            {face.match_status === 'matched' && face.matches.length > 0 && (
+                                                                <div className="text-right">
+                                                                    {(() => {
+                                                                        const label = confidenceLabel(face.matches[0].confidence_score);
+                                                                        return (
+                                                                            <>
+                                                                                <p className={`text-sm font-semibold ${label.color}`}>
+                                                                                    {Math.round(face.matches[0].confidence_score * 100)}%
+                                                                                </p>
+                                                                                <p className={`text-xs ${label.color}`}>{label.text}</p>
+                                                                            </>
+                                                                        );
+                                                                    })()}
+                                                                </div>
+                                                            )}
+                                                            {face.match_status === 'unknown' && (
+                                                                <button
+                                                                    onClick={() => {
+                                                                        setShowAddForm(true);
+                                                                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                                                                    }}
+                                                                    className="text-xs px-2 py-1 bg-yellow-100 hover:bg-yellow-200 text-yellow-700 rounded transition-colors"
+                                                                >
+                                                                    + Add Person
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Show additional matches if any */}
+                                                    {face.matches.length > 1 && (
+                                                        <div className="mt-2 pl-7 space-y-1">
+                                                            <p className="text-[10px] uppercase tracking-wide text-gray-400">Other possible matches</p>
+                                                            {face.matches.slice(1).map(match => {
+                                                                const label = confidenceLabel(match.confidence_score);
+                                                                return (
+                                                                    <div key={match.id} className="flex items-center justify-between text-xs">
+                                                                        <span className="text-gray-600">{match.name}</span>
+                                                                        <span className={label.color}>
+                                                                            {Math.round(match.confidence_score * 100)}%
+                                                                        </span>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </>
                             )}
                         </div>
                     )}

@@ -155,10 +155,12 @@ def face_search(
     user_id: str,
     query_face_vector: list[float],
     limit: int = 3,
+    min_score: float = 0.3,
 ) -> list[dict]:
     """
     Find persons whose face_embedding is closest to a query image.
     Only searches persons that have a face embedding stored (not NULL).
+    Filters out results below min_score to prevent false identifications.
 
     Returns a list of dicts with person_id and similarity_score
     (0.0 to 1.0, higher = better match), sorted by similarity descending.
@@ -186,6 +188,7 @@ def face_search(
                     "similarity_score": round(float(row["similarity_score"]), 4),
                 }
                 for row in rows
+                if float(row["similarity_score"]) >= min_score
             ]
     finally:
         conn.close()
