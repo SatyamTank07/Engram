@@ -6,11 +6,15 @@ Uses the buffalo_l model bundle which includes:
 """
 
 import io
+import logging
 import numpy as np
 import cv2
 from insightface.app import FaceAnalysis
 
+logger = logging.getLogger(__name__)
+
 _face_app = None
+_model_ready = False
 
 
 def get_face_app() -> FaceAnalysis:
@@ -23,6 +27,20 @@ def get_face_app() -> FaceAnalysis:
         )
         _face_app.prepare(ctx_id=0, det_size=(640, 640))
     return _face_app
+
+
+def init_face_model():
+    """Eagerly load the InsightFace model. Call at app startup."""
+    global _model_ready
+    logger.info("Loading InsightFace buffalo_l model...")
+    get_face_app()
+    _model_ready = True
+    logger.info("InsightFace model ready.")
+
+
+def is_model_ready() -> bool:
+    """Check if the face model has finished loading."""
+    return _model_ready
 
 
 def _bytes_to_cv2(image_bytes: bytes) -> np.ndarray:
@@ -81,7 +99,7 @@ def detect_and_embed_all_faces(image_bytes: bytes) -> list[dict]:
     return results
 
 
-def identify_faces_in_image(image_bytes: bytes, user_id: str) -> dict:
+async def identify_faces_in_image(image_bytes: bytes, user_id: str) -> dict:
     """
     End-to-end face identification: detect all faces → search pgvector → enrich from Neo4j.
 
@@ -91,20 +109,35 @@ def identify_faces_in_image(image_bytes: bytes, user_id: str) -> dict:
     - faces_detected: int
     - faces: list of per-face results with bbox, det_score, match_status, and matches
     """
+    import asyncio
     from . import vector_db, graph_db
 
-    detected_faces = detect_and_embed_all_faces(image_bytes)
+    # CPU-bound face detection — run in thread to avoid blocking the event loop
+    detected_faces = await asyncio.to_thread(detect_and_embed_all_faces, image_bytes)
 
     if not detected_faces:
         return {"faces_detected": 0, "faces": [], "message": "No faces detected in the image"}
 
+    # Step A: Batch vector search — sync pgvector call in thread
+    all_embeddings = [f["embedding"] for f in detected_faces]
+    batch_matches = await asyncio.to_thread(
+        vector_db.face_search_batch, user_id, all_embeddings, 3
+    )
+
+    # Step B: Batch person lookup — async Neo4j query (non-blocking)
+    all_person_ids = list({
+        match["person_id"]
+        for face_matches in batch_matches
+        for match in face_matches
+    })
+    persons_map = await graph_db.get_person_nodes_batch(all_person_ids)
+
+    # Step C: Assemble results
     faces_result = []
     for idx, face_data in enumerate(detected_faces):
-        matches = vector_db.face_search(user_id, face_data["embedding"], limit=3)
-
         face_matches = []
-        for match in matches:
-            person = graph_db.get_person_node(match["person_id"])
+        for match in batch_matches[idx]:
+            person = persons_map.get(match["person_id"])
             if person:
                 face_matches.append({
                     **person,

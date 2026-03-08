@@ -9,6 +9,7 @@ python-dotenv==1.0.1
 pydantic==2.11.7
 pydantic-settings==2.6.1
 python-jose[cryptography]==3.3.0
+cryptography>=42.0
 passlib==1.7.4
 bcrypt==4.0.1
 fastmcp
@@ -19,3 +20,5 @@ numpy
 insightface>=0.7
 onnxruntime
 opencv-python-headless
+slowapi>=0.1.9
+aiofiles>=24.1.0

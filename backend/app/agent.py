@@ -14,6 +14,8 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
+from pydantic import BaseModel, Field
+
 # Add project root to path to allow importing mcp_server
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -93,35 +95,15 @@ Example: if face_image_url is "/uploads/faces/abc.jpg", write ![John](/uploads/f
 Maintain a professional yet friendly tone. If you are unsure about a piece of information, ask for clarification before storing it."""
 
 
-# Define wrapper tools with explicit type hints for Gemini compatibility
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
-
+# ---------------------------------------------------------------------------
+# Pydantic schemas for LLM tool parameters (stable, user_id never exposed)
+# ---------------------------------------------------------------------------
 class CreatePersonInput(BaseModel):
     name: str = Field(..., description="Full canonical name of the person")
     aliases: List[str] = Field(default=[], description="List of alternative names, nicknames, or previous names")
     contacts: Dict[str, Any] = Field(default={}, description="Dictionary containing contact information (phone, email, etc.)")
     short_bio: str = Field(default="", description="Brief biography, description, or notes")
     trust_score: float = Field(default=0.0, description="Confidence level (0.0 to 1.0)")
-
-@tool(args_schema=CreatePersonInput)
-def create_person(
-    name: str,
-    aliases: List[str] = [],
-    contacts: Dict[str, Any] = {},
-    short_bio: str = "",
-    trust_score: float = 0.0
-) -> dict:
-    """
-    Create a new person identity in the database.
-    """
-    return create_person_tool(
-        name=name,
-        aliases=aliases,
-        contacts=contacts,
-        short_bio=short_bio,
-        trust_score=trust_score
-    )
 
 class UpdatePersonInput(BaseModel):
     person_id: str = Field(..., description="UUID of the person to update")
@@ -131,59 +113,17 @@ class UpdatePersonInput(BaseModel):
     short_bio: Optional[str] = Field(default=None, description="New biography or notes")
     trust_score: Optional[float] = Field(default=None, description="New confidence score")
 
-@tool(args_schema=UpdatePersonInput)
-def update_person(
-    person_id: str,
-    name: Optional[str] = None,
-    aliases: Optional[List[str]] = None,
-    contacts: Optional[Dict[str, Any]] = None,
-    short_bio: Optional[str] = None,
-    trust_score: Optional[float] = None
-) -> dict:
-    """
-    Update an existing person's information.
-    """
-    return update_person_tool(
-        person_id=person_id,
-        name=name,
-        aliases=aliases,
-        contacts=contacts,
-        short_bio=short_bio,
-        trust_score=trust_score
-    )
-
 class GetPersonInput(BaseModel):
     person_id: str = Field(..., description="UUID of the person to retrieve")
-
-@tool(args_schema=GetPersonInput)
-def get_person(person_id: str) -> dict:
-    """Get details of a specific person by their ID."""
-    return get_person_tool(person_id)
 
 class ListPersonsInput(BaseModel):
     limit: Optional[int] = Field(default=50, description="Maximum number of persons to return")
 
-@tool(args_schema=ListPersonsInput)
-def list_persons(limit: Optional[int] = 50) -> dict:
-    """List all saved persons for the current user."""
-    return list_persons_tool(limit)
-
 class DeletePersonInput(BaseModel):
     person_id: str = Field(..., description="UUID of the person to delete")
 
-@tool(args_schema=DeletePersonInput)
-def delete_person(person_id: str) -> dict:
-    """Delete a person from the database."""
-    return delete_person_tool(person_id)
-
 class SearchPersonInput(BaseModel):
     search_term: str = Field(..., description="Name or partial name to search for")
-
-@tool(args_schema=SearchPersonInput)
-def search_person(search_term: str) -> dict:
-    """Search for persons by name."""
-    return search_person_tool(search_term)
-
 
 class AddRelationshipInput(BaseModel):
     from_person_name: str = Field(..., description="Name of the first person")
@@ -191,50 +131,109 @@ class AddRelationshipInput(BaseModel):
     relationship_type: str = Field(..., description="Type of relationship: KNOWS, FRIEND, FAMILY, COLLEAGUE, WORKS_WITH, MANAGES, REPORTS_TO, MENTOR, PARTNER, NEIGHBOR, CLASSMATE")
     notes: Optional[str] = Field(default=None, description="Optional notes about the relationship")
 
-@tool(args_schema=AddRelationshipInput)
-def add_relationship(
-    from_person_name: str,
-    to_person_name: str,
-    relationship_type: str,
-    notes: Optional[str] = None
-) -> dict:
-    """Create a relationship between two people in the knowledge graph. Both persons must already exist."""
-    return add_relationship_tool(
-        from_person_name=from_person_name,
-        to_person_name=to_person_name,
-        relationship_type=relationship_type,
-        notes=notes
-    )
-
-
 class GetRelationshipsInput(BaseModel):
     person_name: str = Field(..., description="Name of the person to find relationships for")
 
-@tool(args_schema=GetRelationshipsInput)
-def get_relationships(person_name: str) -> dict:
-    """Get all relationships for a person — shows how they are connected to others."""
-    return get_relationships_tool(person_name)
-
-
 class IdentifyFaceInput(BaseModel):
     image_url: str = Field(..., description="URL path of the uploaded image (e.g. /uploads/chat/uuid.jpg)")
-
-@tool(args_schema=IdentifyFaceInput)
-def identify_face(image_url: str) -> dict:
-    """Detect and identify all faces in an uploaded image. Returns per-face results with bounding boxes, detection scores, and matched persons with confidence scores."""
-    return identify_face_from_url_tool(image_url)
-
 
 class StorePersonFaceInput(BaseModel):
     person_id: str = Field(..., description="UUID of the person to link the face to")
     image_url: str = Field(..., description="URL path of the uploaded chat image (e.g. /uploads/chat/uuid.jpg)")
 
-@tool(args_schema=StorePersonFaceInput)
-def store_person_face(person_id: str, image_url: str) -> dict:
-    """Store a face embedding for a person from an uploaded chat image. Call this after creating or finding a person when the user wants to link their face from an uploaded photo."""
-    return store_person_face_tool(person_id, image_url)
+
+# ---------------------------------------------------------------------------
+# Tool factory — creates LangChain tools with user_id baked into closures.
+# The LLM never sees or controls user_id.
+# ---------------------------------------------------------------------------
+def _make_tools(user_id: str):
+    """Return a list of async LangChain tools bound to the authenticated user_id."""
+
+    @tool(args_schema=CreatePersonInput)
+    async def create_person(
+        name: str,
+        aliases: List[str] = [],
+        contacts: Dict[str, Any] = {},
+        short_bio: str = "",
+        trust_score: float = 0.0,
+    ) -> dict:
+        """Create a new person identity in the database."""
+        return await create_person_tool(user_id, name=name, aliases=aliases, contacts=contacts, short_bio=short_bio, trust_score=trust_score)
+
+    @tool(args_schema=UpdatePersonInput)
+    async def update_person(
+        person_id: str,
+        name: Optional[str] = None,
+        aliases: Optional[List[str]] = None,
+        contacts: Optional[Dict[str, Any]] = None,
+        short_bio: Optional[str] = None,
+        trust_score: Optional[float] = None,
+    ) -> dict:
+        """Update an existing person's information."""
+        return await update_person_tool(user_id, person_id=person_id, name=name, aliases=aliases, contacts=contacts, short_bio=short_bio, trust_score=trust_score)
+
+    @tool(args_schema=GetPersonInput)
+    async def get_person(person_id: str) -> dict:
+        """Get details of a specific person by their ID."""
+        return await get_person_tool(user_id, person_id)
+
+    @tool(args_schema=ListPersonsInput)
+    async def list_persons(limit: Optional[int] = 50) -> dict:
+        """List all saved persons for the current user."""
+        return await list_persons_tool(user_id, limit)
+
+    @tool(args_schema=DeletePersonInput)
+    async def delete_person(person_id: str) -> dict:
+        """Delete a person from the database."""
+        return await delete_person_tool(user_id, person_id)
+
+    @tool(args_schema=SearchPersonInput)
+    async def search_person(search_term: str) -> dict:
+        """Search for persons by name."""
+        return await search_person_tool(user_id, search_term)
+
+    @tool(args_schema=AddRelationshipInput)
+    async def add_relationship(
+        from_person_name: str,
+        to_person_name: str,
+        relationship_type: str,
+        notes: Optional[str] = None,
+    ) -> dict:
+        """Create a relationship between two people in the knowledge graph. Both persons must already exist."""
+        return await add_relationship_tool(user_id, from_person_name=from_person_name, to_person_name=to_person_name, relationship_type=relationship_type, notes=notes)
+
+    @tool(args_schema=GetRelationshipsInput)
+    async def get_relationships(person_name: str) -> dict:
+        """Get all relationships for a person — shows how they are connected to others."""
+        return await get_relationships_tool(user_id, person_name)
+
+    @tool(args_schema=IdentifyFaceInput)
+    async def identify_face(image_url: str) -> dict:
+        """Detect and identify all faces in an uploaded image. Returns per-face results with bounding boxes, detection scores, and matched persons with confidence scores."""
+        return await identify_face_from_url_tool(user_id, image_url)
+
+    @tool(args_schema=StorePersonFaceInput)
+    async def store_person_face(person_id: str, image_url: str) -> dict:
+        """Store a face embedding for a person from an uploaded chat image. Call this after creating or finding a person when the user wants to link their face from an uploaded photo."""
+        return await store_person_face_tool(user_id, person_id, image_url)
+
+    return [
+        create_person,
+        get_person,
+        list_persons,
+        update_person,
+        delete_person,
+        search_person,
+        add_relationship,
+        get_relationships,
+        identify_face,
+        store_person_face,
+    ]
 
 
+# ---------------------------------------------------------------------------
+# LLM setup
+# ---------------------------------------------------------------------------
 def _get_openai_llm():
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -256,71 +255,76 @@ def _get_google_llm():
 def get_llm():
     """Initialize and return the LLM based on environment configuration."""
     provider = os.getenv("LLM_PROVIDER", "openai").lower()
-    
     providers = {
         "openai": _get_openai_llm,
         "google": _get_google_llm,
     }
-    
     if provider not in providers:
         raise ValueError(f"Unsupported LLM provider: {provider}. Supported: {list(providers.keys())}")
-        
     return providers[provider]()
 
 
+# ---------------------------------------------------------------------------
+# Chat history formatting
+# ---------------------------------------------------------------------------
+MAX_HISTORY_PAIRS = 10  # Keep last N question-answer pairs
 
 
 def format_chat_history(messages: list[dict]) -> list:
-    """Convert chat history to LangChain message format."""
+    """Convert chat history to LangChain message format.
+
+    Only the last ``MAX_HISTORY_PAIRS`` Q&A pairs are kept to avoid
+    excessive token usage and potential context-window overflow on long
+    conversations.
+    """
+    # Window: keep only the last N pairs (2 messages per pair)
+    window_size = MAX_HISTORY_PAIRS * 2
+    windowed = messages[-window_size:] if len(messages) > window_size else messages
+
     formatted = [SystemMessage(content=SYSTEM_PROMPT)]
-    
-    for msg in messages:
+    for msg in windowed:
         if msg["role"] == "user":
             formatted.append(HumanMessage(content=msg["content"]))
         elif msg["role"] == "assistant":
             formatted.append(AIMessage(content=msg["content"]))
-    
     return formatted
 
 
-def get_agent_response(user_message: str, chat_history: list[dict] = None, image_url: str | None = None) -> str:
+# ---------------------------------------------------------------------------
+# Main agent entry point
+# ---------------------------------------------------------------------------
+MAX_TOOL_ITERATIONS = 10
+
+
+async def get_agent_response(
+    user_message: str,
+    chat_history: list[dict] = None,
+    image_url: str | None = None,
+    user_id: str | None = None,
+) -> str:
     """
-    Get a response from the AI agent.
+    Get a response from the AI agent (async).
 
     Args:
         user_message: The user's input message
         chat_history: List of previous messages [{"role": "user"|"assistant", "content": "..."}]
         image_url: Optional URL of an uploaded image attached to this message
-
-    Returns:
-        The AI's response as a string
+        user_id: Authenticated user's ID — used to scope all tool operations
     """
     if chat_history is None:
         chat_history = []
 
     if image_url:
         user_message = f"[ATTACHED_IMAGE]\nImage URL: {image_url}\n[/ATTACHED_IMAGE]\n\n{user_message}"
-    
+
     try:
         llm = get_llm()
-        
-        # Tools configuration
+
+        # Build tools scoped to this user
         tools = []
-        if MCP_TOOLS_AVAILABLE:
-            tools = [
-                create_person,
-                get_person,
-                list_persons,
-                update_person,
-                delete_person,
-                search_person,
-                add_relationship,
-                get_relationships,
-                identify_face,
-                store_person_face,
-            ]
-        
-        # Bind tools if available
+        if MCP_TOOLS_AVAILABLE and user_id:
+            tools = _make_tools(user_id)
+
         if tools:
             llm_with_tools = llm.bind_tools(tools)
         else:
@@ -329,42 +333,54 @@ def get_agent_response(user_message: str, chat_history: list[dict] = None, image
         # Format the conversation history
         messages = format_chat_history(chat_history)
         messages.append(HumanMessage(content=user_message))
-        
+
         # Get response from the model
-        response = llm_with_tools.invoke(messages)
-        
-        # Handle tool calls
-        while response.tool_calls:
+        response = await llm_with_tools.ainvoke(messages)
+
+        # Handle tool calls with iteration limit
+        iterations = 0
+        while response.tool_calls and iterations < MAX_TOOL_ITERATIONS:
+            iterations += 1
             messages.append(response)
-            
+
             for tool_call in response.tool_calls:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["args"]
-                
-                # Find the tool
+
                 selected_tool = next((t for t in tools if t.name == tool_name), None)
-                
+
                 if selected_tool:
                     try:
-                        # Execute tool
-                        print(f"Executing tool: {tool_name} with args: {tool_args}")
-                        # For LangChain @tool, we invoke it
-                        tool_result = selected_tool.invoke(tool_args)
+                        tool_result = await selected_tool.ainvoke(tool_args)
                         content = json.dumps(tool_result)
                     except Exception as e:
                         content = f"Error executing tool {tool_name}: {str(e)}"
                 else:
                     content = f"Error: Tool {tool_name} not found"
-                
+
                 messages.append(ToolMessage(content=content, tool_call_id=tool_call["id"]))
-            
-            # Get next response from model
-            response = llm_with_tools.invoke(messages)
-        
+
+            response = await llm_with_tools.ainvoke(messages)
+
+        # If we exhausted iterations but the LLM still wants to call tools,
+        # force a final response explaining the limit was reached.
+        if iterations >= MAX_TOOL_ITERATIONS and response.tool_calls:
+            messages.append(response)
+            # Add a synthetic tool error for each pending call
+            for tool_call in response.tool_calls:
+                messages.append(
+                    ToolMessage(
+                        content="Error: Maximum tool iteration limit reached. "
+                        "Please summarize what you have so far and respond to the user.",
+                        tool_call_id=tool_call["id"],
+                    )
+                )
+            response = await llm_with_tools.ainvoke(messages)
+
         return response.content
-    
+
     except Exception as e:
         error_msg = str(e)
         if "API key" in error_msg.lower():
-            raise ValueError("Invalid or missing Google API key")
+            raise ValueError("Invalid or missing API key")
         raise Exception(f"Error getting response: {error_msg}")

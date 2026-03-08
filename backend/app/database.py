@@ -5,7 +5,7 @@ Database models and connection for FastAPI backend.
 import os
 import uuid
 from datetime import datetime
-from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey, Boolean, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -26,6 +26,9 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
+    refresh_token_encrypted = Column(Text, nullable=True)
+    refresh_token_expires_at = Column(DateTime, nullable=True)
+
     sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
 
 
@@ -34,7 +37,7 @@ class ChatSession(Base):
     __tablename__ = "chat_sessions"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     title = Column(String(255), default="New Chat")
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -52,6 +55,10 @@ class ChatMessage(Base):
     content = Column(Text, nullable=False)
     image_url = Column(String(512), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('ix_chat_messages_session_timestamp', 'session_id', 'timestamp'),
+    )
 
     session = relationship("ChatSession", back_populates="messages")
 

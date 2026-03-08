@@ -3,12 +3,15 @@ Knowledge Graph operations using Neo4j for PersonIdentity storage.
 Replaces PostgreSQL-based PersonIdentity CRUD with graph-native operations.
 """
 
+import asyncio
+import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from neo4j import GraphDatabase
+from neo4j import AsyncGraphDatabase
 
 
 # Neo4j connection settings
@@ -18,22 +21,22 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "engram_graph")
 
 
 class Neo4jConnection:
-    """Singleton Neo4j driver manager."""
+    """Singleton Neo4j async driver manager."""
 
     _driver = None
 
     @classmethod
     def get_driver(cls):
         if cls._driver is None:
-            cls._driver = GraphDatabase.driver(
+            cls._driver = AsyncGraphDatabase.driver(
                 NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD)
             )
         return cls._driver
 
     @classmethod
-    def close(cls):
+    async def close(cls):
         if cls._driver is not None:
-            cls._driver.close()
+            await cls._driver.close()
             cls._driver = None
 
 
@@ -41,24 +44,24 @@ def _get_driver():
     return Neo4jConnection.get_driver()
 
 
-def init_graph_db():
+async def init_graph_db():
     """Create indexes and constraints for the Person nodes."""
     driver = _get_driver()
-    with driver.session() as session:
+    async with driver.session() as session:
         # Unique constraint on Person.id
-        session.run(
+        await session.run(
             "CREATE CONSTRAINT person_id_unique IF NOT EXISTS "
             "FOR (p:Person) REQUIRE p.id IS UNIQUE"
         )
         # Index on Person.user_id for fast per-user lookups
-        session.run(
+        await session.run(
             "CREATE INDEX person_user_id IF NOT EXISTS "
             "FOR (p:Person) ON (p.user_id)"
         )
-        # Index on Person.name for search
-        session.run(
-            "CREATE INDEX person_name IF NOT EXISTS "
-            "FOR (p:Person) ON (p.name)"
+        # Full-text index on Person.name for case-insensitive search
+        await session.run(
+            "CREATE FULLTEXT INDEX person_name_fulltext IF NOT EXISTS "
+            "FOR (p:Person) ON EACH [p.name]"
         )
 
 
@@ -67,7 +70,7 @@ def init_graph_db():
 # ---------------------
 
 
-def create_person_node(
+async def create_person_node(
     user_id: str,
     name: str,
     aliases: list[str] | None = None,
@@ -80,8 +83,8 @@ def create_person_node(
     now = datetime.now(timezone.utc).isoformat()
     person_id = str(uuid.uuid4())
 
-    with driver.session() as session:
-        result = session.run(
+    async with driver.session() as session:
+        result = await session.run(
             """
             CREATE (p:Person {
                 id: $id,
@@ -105,33 +108,33 @@ def create_person_node(
             trust_score=str(trust_score),
             now=now,
         )
-        record = result.single()
+        record = await result.single()
         if record:
             person = _node_to_dict(record["p"])
-            _sync_embedding(person)
+            await asyncio.to_thread(_sync_embedding, person)
             return person
     return {}
 
 
-def get_person_node(person_id: str) -> dict | None:
+async def get_person_node(person_id: str) -> dict | None:
     """Get a Person node by its ID."""
     driver = _get_driver()
-    with driver.session() as session:
-        result = session.run(
+    async with driver.session() as session:
+        result = await session.run(
             "MATCH (p:Person {id: $id}) RETURN p",
             id=person_id,
         )
-        record = result.single()
+        record = await result.single()
         if record:
             return _node_to_dict(record["p"])
     return None
 
 
-def list_person_nodes(user_id: str, limit: int = 50) -> list[dict]:
+async def list_person_nodes(user_id: str, limit: int = 50) -> list[dict]:
     """List all Person nodes for a given user, ordered by last_seen desc."""
     driver = _get_driver()
-    with driver.session() as session:
-        result = session.run(
+    async with driver.session() as session:
+        result = await session.run(
             """
             MATCH (p:Person {user_id: $user_id})
             RETURN p
@@ -141,10 +144,11 @@ def list_person_nodes(user_id: str, limit: int = 50) -> list[dict]:
             user_id=str(user_id),
             limit=limit,
         )
-        return [_node_to_dict(record["p"]) for record in result]
+        records = [record async for record in result]
+        return [_node_to_dict(record["p"]) for record in records]
 
 
-def update_person_node(
+async def update_person_node(
     person_id: str,
     name: str | None = None,
     aliases: list[str] | None = None,
@@ -184,52 +188,96 @@ def update_person_node(
 
     set_clause = ", ".join(set_parts)
 
-    with driver.session() as session:
-        result = session.run(
+    async with driver.session() as session:
+        result = await session.run(
             f"MATCH (p:Person {{id: $id}}) SET {set_clause} RETURN p",
             **params,
         )
-        record = result.single()
+        record = await result.single()
         if record:
             person = _node_to_dict(record["p"])
-            _sync_embedding(person)
+            await asyncio.to_thread(_sync_embedding, person)
             return person
     return None
 
 
-def delete_person_node(person_id: str) -> bool:
-    """Delete a Person node and all its relationships."""
-    # Delete embeddings from pgvector first
-    try:
-        from . import vector_db
-        vector_db.delete_embedding(person_id)
-    except Exception as e:
-        print(f"Warning: Failed to delete embedding for {person_id}: {e}")
+async def delete_person_node(person_id: str) -> bool:
+    """Delete a Person node and all its relationships.
+
+    Deletes the Neo4j node first (authoritative), then cleans up
+    the pgvector embedding. If embedding cleanup fails, it is queued
+    for background retry.
+    """
+    # Get user_id before deleting (needed for pending sync queue)
+    person = await get_person_node(person_id)
+    user_id = person.get("user_id", "") if person else ""
 
     driver = _get_driver()
-    with driver.session() as session:
-        result = session.run(
+    async with driver.session() as session:
+        result = await session.run(
             "MATCH (p:Person {id: $id}) DETACH DELETE p RETURN count(p) AS deleted",
             id=person_id,
         )
-        record = result.single()
-        return record and record["deleted"] > 0
+        record = await result.single()
+        deleted = record and record["deleted"] > 0
+
+    if deleted:
+        try:
+            from . import vector_db
+            vector_db.delete_embedding(person_id)
+        except Exception as e:
+            print(f"Warning: Failed to delete embedding for {person_id}: {e}. Queued for retry.")
+            try:
+                from . import vector_db
+                vector_db.insert_pending_sync(person_id, user_id, operation="delete")
+            except Exception as queue_err:
+                print(f"Error: Could not queue pending delete for {person_id}: {queue_err}")
+
+    return deleted
 
 
-def search_persons(user_id: str, search_term: str) -> list[dict]:
-    """Search Person nodes by name (case-insensitive partial match)."""
+async def get_person_nodes_batch(person_ids: list[str]) -> dict[str, dict]:
+    """Fetch multiple Person nodes in a single Neo4j query.
+
+    Returns a dict mapping person_id -> person dict for all found nodes.
+    """
+    if not person_ids:
+        return {}
+
     driver = _get_driver()
-    with driver.session() as session:
-        result = session.run(
-            """
-            MATCH (p:Person {user_id: $user_id})
-            WHERE toLower(p.name) CONTAINS toLower($search_term)
-            RETURN p
-            """,
-            user_id=str(user_id),
-            search_term=search_term,
+    async with driver.session() as session:
+        result = await session.run(
+            "MATCH (p:Person) WHERE p.id IN $ids RETURN p",
+            ids=person_ids,
         )
-        return [_node_to_dict(record["p"]) for record in result]
+        records = [record async for record in result]
+        return {record["p"]["id"]: _node_to_dict(record["p"]) for record in records}
+
+
+async def search_persons(user_id: str, search_term: str) -> list[dict]:
+    """Search Person nodes by name using full-text index (case-insensitive)."""
+    if not search_term or not search_term.strip():
+        return []
+
+    driver = _get_driver()
+    escaped = _escape_lucene_query(search_term.strip())
+    # Wildcard prefix/suffix for substring-like matching
+    lucene_query = f"*{escaped}*"
+
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            CALL db.index.fulltext.queryNodes('person_name_fulltext', $query)
+            YIELD node AS p, score
+            WHERE p.user_id = $user_id
+            RETURN p
+            ORDER BY score DESC
+            """,
+            query=lucene_query,
+            user_id=str(user_id),
+        )
+        records = [record async for record in result]
+        return [_node_to_dict(record["p"]) for record in records]
 
 
 # ---------------------
@@ -237,7 +285,7 @@ def search_persons(user_id: str, search_term: str) -> list[dict]:
 # ---------------------
 
 
-def add_relationship(
+async def add_relationship(
     from_person_id: str,
     to_person_id: str,
     rel_type: str,
@@ -245,16 +293,16 @@ def add_relationship(
 ) -> dict | None:
     """
     Create a relationship between two Person nodes.
-    
+
     Example rel_types: KNOWS, WORKS_WITH, FAMILY, FRIEND, COLLEAGUE, MANAGES
     """
     driver = _get_driver()
     props = properties or {}
     props["created_at"] = datetime.now(timezone.utc).isoformat()
 
-    with driver.session() as session:
+    async with driver.session() as session:
         # Use APOC or dynamic relationship type
-        result = session.run(
+        result = await session.run(
             f"""
             MATCH (a:Person {{id: $from_id}})
             MATCH (b:Person {{id: $to_id}})
@@ -265,7 +313,7 @@ def add_relationship(
             to_id=to_person_id,
             props=props,
         )
-        record = result.single()
+        record = await result.single()
         if record:
             return {
                 "from": record["from_name"],
@@ -275,21 +323,22 @@ def add_relationship(
     return None
 
 
-def get_relationships(person_id: str) -> list[dict]:
+async def get_relationships(person_id: str) -> list[dict]:
     """Get all relationships for a Person node."""
     driver = _get_driver()
-    with driver.session() as session:
-        result = session.run(
+    async with driver.session() as session:
+        result = await session.run(
             """
             MATCH (p:Person {id: $id})-[r]-(other:Person)
-            RETURN type(r) AS rel_type, 
+            RETURN type(r) AS rel_type,
                    properties(r) AS rel_props,
-                   other.id AS other_id, 
+                   other.id AS other_id,
                    other.name AS other_name,
                    startNode(r) = p AS is_outgoing
             """,
             id=person_id,
         )
+        records = [record async for record in result]
         return [
             {
                 "relationship": record["rel_type"],
@@ -298,7 +347,7 @@ def get_relationships(person_id: str) -> list[dict]:
                 "person_name": record["other_name"],
                 "direction": "outgoing" if record["is_outgoing"] else "incoming",
             }
-            for record in result
+            for record in records
         ]
 
 
@@ -307,12 +356,19 @@ def get_relationships(person_id: str) -> list[dict]:
 # ---------------------
 
 
+_LUCENE_SPECIAL_CHARS = re.compile(r'([+\-&|!(){}[\]^"~*?:\\])')
+
+
+def _escape_lucene_query(query: str) -> str:
+    """Escape Lucene special characters in a search term."""
+    return _LUCENE_SPECIAL_CHARS.sub(r"\\\1", query)
+
+
 def _node_to_dict(node) -> dict:
     """Convert a Neo4j node to a plain dictionary."""
     data = dict(node)
     # Deserialize contacts back from JSON string
     if "contacts" in data and isinstance(data["contacts"], str):
-        import json
         try:
             data["contacts"] = json.loads(data["contacts"])
         except (json.JSONDecodeError, TypeError):
@@ -322,10 +378,9 @@ def _node_to_dict(node) -> dict:
 
 def _serialize_contacts(contacts: dict) -> str:
     """Serialize contacts dict to JSON string for Neo4j storage.
-    
+
     Neo4j doesn't natively support nested maps, so we store contacts as a JSON string.
     """
-    import json
     return json.dumps(contacts)
 
 
@@ -339,7 +394,8 @@ def _sanitize_rel_type(rel_type: str) -> str:
 def _sync_embedding(person: dict):
     """Sync person data to pgvector as a text embedding.
 
-    Runs in a try/except so embedding failures don't break person CRUD.
+    On failure, queues the sync for background retry so that Neo4j
+    and pgvector stay eventually consistent.
     """
     try:
         from . import embedding_service, vector_db
@@ -356,6 +412,15 @@ def _sync_embedding(person: dict):
             text_content=text_content,
             embedding=embedding,
         )
-        print(f"[EMBEDDING] ✅ Synced embedding for '{person.get('name')}': \"{text_content[:80]}...\"")
+        print(f"[EMBEDDING] Synced embedding for '{person.get('name')}': \"{text_content[:80]}...\"")
     except Exception as e:
-        print(f"Warning: Failed to sync embedding for person {person.get('id')}: {e}")
+        print(f"Warning: Failed to sync embedding for person {person.get('id')}: {e}. Queued for retry.")
+        try:
+            from . import vector_db
+            vector_db.insert_pending_sync(
+                person_id=person["id"],
+                user_id=person["user_id"],
+                operation="upsert",
+            )
+        except Exception as queue_err:
+            print(f"Error: Could not queue pending sync for {person.get('id')}: {queue_err}")

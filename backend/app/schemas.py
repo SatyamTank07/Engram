@@ -33,10 +33,16 @@ class LoginRequest(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    """Schema for login response."""
-    access_token: str
+    """Schema for login response (tokens are set via httpOnly cookies)."""
     token_type: str = "bearer"
+    expires_in: int = 3600  # seconds until access token expires
     user: UserResponse
+
+
+class RefreshResponse(BaseModel):
+    """Schema for token refresh response."""
+    token_type: str = "bearer"
+    expires_in: int = 3600
 
 
 class MessageResponse(BaseModel):
