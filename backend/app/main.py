@@ -2,9 +2,14 @@
 FastAPI main application with chat endpoints.
 """
 
-import os
+import logging
 import uuid
+from contextlib import asynccontextmanager
+from io import BytesIO
 from pathlib import Path
+
+import aiofiles
+import aiofiles.os
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, status, UploadFile, File
 from fastapi.concurrency import run_in_threadpool
@@ -38,18 +43,31 @@ try:
 except Exception as e:
     print(f"Warning: Could not initialize pgvector: {e}. Semantic search may not work.")
 
-# Initialize Neo4j knowledge graph indexes
-try:
-    graph_db.init_graph_db()
-    print("Neo4j knowledge graph initialized successfully.")
-except Exception as e:
-    print(f"Warning: Could not initialize Neo4j: {e}. Person identity features may not work.")
+# Neo4j is initialized asynchronously in the lifespan handler below.
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """Startup: eagerly load heavy models + init Neo4j. Shutdown: release connection pools."""
+    await run_in_threadpool(face_service.init_face_model)
+    try:
+        await graph_db.init_graph_db()
+        print("Neo4j knowledge graph initialized successfully.")
+    except Exception as e:
+        print(f"Warning: Could not initialize Neo4j: {e}. Person identity features may not work.")
+    yield
+    await graph_db.Neo4jConnection.close()
+    vector_db.close_pool()
+
 
 # Create FastAPI app
 app = FastAPI(
     title="Chat API",
     description="FastAPI backend for chat application with LangChain",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Initialize rate limiter
@@ -74,6 +92,14 @@ app.add_middleware(
 def read_root():
     """Health check endpoint."""
     return {"status": "ok", "message": "Chat API is running"}
+
+
+@app.get("/readyz")
+def readiness_check():
+    """Readiness probe — returns 503 until the face model is loaded."""
+    if not face_service.is_model_ready():
+        return Response(status_code=503, content="Face model loading...")
+    return {"status": "ready"}
 
 
 # Authentication endpoints
@@ -336,16 +362,16 @@ async def upload_image(
     filepath = UPLOAD_DIR / "chat" / filename
 
     size = 0
-    with open(filepath, "wb") as f:
+    async with aiofiles.open(filepath, "wb") as f:
         while chunk := await file.read(CHUNK_SIZE):
             size += len(chunk)
             if size > MAX_UPLOAD_SIZE:
-                os.remove(filepath) # Clean up partial file
+                await aiofiles.os.remove(filepath)
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     detail=f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024)}MB"
                 )
-            await run_in_threadpool(f.write, chunk)
+            await f.write(chunk)
 
     return {"url": f"/uploads/chat/{filename}"}
 
@@ -353,12 +379,12 @@ async def upload_image(
 # PersonIdentity endpoints (powered by Neo4j Knowledge Graph)
 
 @app.post("/api/persons", status_code=status.HTTP_201_CREATED)
-def create_person(
+async def create_person(
     person_data: schemas.PersonIdentityCreate,
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Create a new person identity in the knowledge graph."""
-    person = graph_db.create_person_node(
+    person = await graph_db.create_person_node(
         user_id=str(current_user.id),
         name=person_data.name,
         aliases=person_data.aliases,
@@ -370,44 +396,44 @@ def create_person(
 
 
 @app.get("/api/persons")
-def get_persons(
+async def get_persons(
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Get all person identities for the authenticated user from the knowledge graph."""
-    return graph_db.list_person_nodes(str(current_user.id))
+    return await graph_db.list_person_nodes(str(current_user.id))
 
 
 @app.get("/api/persons/{person_id}")
-def get_person(
+async def get_person(
     person_id: str,
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Get a specific person identity from the knowledge graph."""
-    person = graph_db.get_person_node(person_id)
+    person = await graph_db.get_person_node(person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
-    
+
     if person.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     return person
 
 
 @app.put("/api/persons/{person_id}")
-def update_person(
+async def update_person(
     person_id: str,
     person_data: schemas.PersonIdentityUpdate,
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Update a person identity in the knowledge graph."""
-    person = graph_db.get_person_node(person_id)
+    person = await graph_db.get_person_node(person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
-    
+
     if person.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=403, detail="Access denied")
-    
-    updated_person = graph_db.update_person_node(
+
+    updated_person = await graph_db.update_person_node(
         person_id,
         name=person_data.name,
         aliases=person_data.aliases,
@@ -419,24 +445,24 @@ def update_person(
 
 
 @app.delete("/api/persons/{person_id}")
-def delete_person(
+async def delete_person(
     person_id: str,
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Delete a person identity from the knowledge graph."""
-    person = graph_db.get_person_node(person_id)
+    person = await graph_db.get_person_node(person_id)
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
-    
+
     if person.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=403, detail="Access denied")
-    
-    graph_db.delete_person_node(person_id)
+
+    await graph_db.delete_person_node(person_id)
     return {"status": "deleted", "person_id": person_id}
 
 
 @app.post("/api/persons/search")
-def semantic_search_persons(
+async def semantic_search_persons(
     search_req: schemas.SemanticSearchRequest,
     current_user: database.User = Depends(auth.get_current_user),
 ):
@@ -444,19 +470,25 @@ def semantic_search_persons(
     from . import embedding_service
 
     # Generate embedding for the search query
-    query_embedding = embedding_service.generate_text_embedding(search_req.query)
+    query_embedding = await run_in_threadpool(
+        embedding_service.generate_text_embedding, search_req.query
+    )
 
     # Search pgvector for similar persons
-    matches = vector_db.semantic_search(
+    matches = await run_in_threadpool(
+        vector_db.semantic_search,
         user_id=str(current_user.id),
         query_embedding=query_embedding,
         limit=search_req.limit,
     )
 
-    # Enrich with full Neo4j data
+    # Batch enrich with full Neo4j data — 1 query instead of N
+    person_ids = [match["person_id"] for match in matches]
+    persons_map = await graph_db.get_person_nodes_batch(person_ids)
+
     results = []
     for match in matches:
-        person = graph_db.get_person_node(match["person_id"])
+        person = persons_map.get(match["person_id"])
         if person:
             results.append({
                 **person,
@@ -484,16 +516,18 @@ async def identify_person_from_face(
             detail=f"Unsupported file type: {file.content_type}. Allowed types are: {', '.join(ALLOWED_IMAGE_TYPES)}"
         )
         
-    image_bytes = bytearray()
+    buffer = BytesIO()
+    size = 0
     while chunk := await file.read(CHUNK_SIZE):
-        image_bytes.extend(chunk)
-        if len(image_bytes) > MAX_UPLOAD_SIZE:
+        size += len(chunk)
+        if size > MAX_UPLOAD_SIZE:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024)}MB"
             )
+        buffer.write(chunk)
 
-    return await run_in_threadpool(face_service.identify_faces_in_image, bytes(image_bytes), str(current_user.id))
+    return await face_service.identify_faces_in_image(buffer.getvalue(), str(current_user.id))
 
 
 @app.post("/api/persons/{person_id}/face")
@@ -512,7 +546,7 @@ async def upload_person_face(
             detail=f"Unsupported file type: {file.content_type}. Allowed types are: {', '.join(ALLOWED_IMAGE_TYPES)}"
         )
 
-    person = graph_db.get_person_node(person_id)
+    person = await graph_db.get_person_node(person_id)
     if not person or person.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=404, detail="Person not found")
 
@@ -521,18 +555,20 @@ async def upload_person_face(
     filepath = UPLOAD_DIR / "faces" / filename
 
     # Read and write securely
-    image_bytes = bytearray()
-    with open(filepath, "wb") as f:
+    buffer = BytesIO()
+    size = 0
+    async with aiofiles.open(filepath, "wb") as f:
         while chunk := await file.read(CHUNK_SIZE):
-            image_bytes.extend(chunk)
-            if len(image_bytes) > MAX_UPLOAD_SIZE:
-                os.remove(filepath)
+            size += len(chunk)
+            if size > MAX_UPLOAD_SIZE:
+                await aiofiles.os.remove(filepath)
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     detail=f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024)}MB"
                 )
-            await run_in_threadpool(f.write, chunk)
-    final_image_bytes = bytes(image_bytes)
+            buffer.write(chunk)
+            await f.write(chunk)
+    final_image_bytes = buffer.getvalue()
 
     face_image_url = f"/uploads/faces/{filename}"
 
@@ -541,6 +577,6 @@ async def upload_person_face(
     await run_in_threadpool(vector_db.upsert_face_embedding, person_id, str(current_user.id), face_vector)
 
     # Save image URL on the person node
-    graph_db.update_person_node(person_id, face_image_url=face_image_url)
+    await graph_db.update_person_node(person_id, face_image_url=face_image_url)
 
     return {"message": "Face embedding stored", "person_id": person_id, "face_image_url": face_image_url}

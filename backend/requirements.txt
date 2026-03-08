@@ -21,3 +21,4 @@ insightface>=0.7
 onnxruntime
 opencv-python-headless
 slowapi>=0.1.9
+aiofiles>=24.1.0

@@ -41,9 +41,12 @@ RUN mkdir -p /app/backend/uploads/chat /app/backend/uploads/faces /home/engram/.
 
 USER engram
 
+# InsightFace buffalo_l model (~300MB) is downloaded on first startup.
+# Mount a volume at /home/engram/.insightface to persist it across restarts.
+
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/')" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')" || exit 1
 
 CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

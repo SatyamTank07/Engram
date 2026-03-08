@@ -267,10 +267,22 @@ def get_llm():
 # ---------------------------------------------------------------------------
 # Chat history formatting
 # ---------------------------------------------------------------------------
+MAX_HISTORY_PAIRS = 10  # Keep last N question-answer pairs
+
+
 def format_chat_history(messages: list[dict]) -> list:
-    """Convert chat history to LangChain message format."""
+    """Convert chat history to LangChain message format.
+
+    Only the last ``MAX_HISTORY_PAIRS`` Q&A pairs are kept to avoid
+    excessive token usage and potential context-window overflow on long
+    conversations.
+    """
+    # Window: keep only the last N pairs (2 messages per pair)
+    window_size = MAX_HISTORY_PAIRS * 2
+    windowed = messages[-window_size:] if len(messages) > window_size else messages
+
     formatted = [SystemMessage(content=SYSTEM_PROMPT)]
-    for msg in messages:
+    for msg in windowed:
         if msg["role"] == "user":
             formatted.append(HumanMessage(content=msg["content"]))
         elif msg["role"] == "assistant":
@@ -348,6 +360,21 @@ def get_agent_response(
 
                 messages.append(ToolMessage(content=content, tool_call_id=tool_call["id"]))
 
+            response = llm_with_tools.invoke(messages)
+
+        # If we exhausted iterations but the LLM still wants to call tools,
+        # force a final response explaining the limit was reached.
+        if iterations >= MAX_TOOL_ITERATIONS and response.tool_calls:
+            messages.append(response)
+            # Add a synthetic tool error for each pending call
+            for tool_call in response.tool_calls:
+                messages.append(
+                    ToolMessage(
+                        content="Error: Maximum tool iteration limit reached. "
+                        "Please summarize what you have so far and respond to the user.",
+                        tool_call_id=tool_call["id"],
+                    )
+                )
             response = llm_with_tools.invoke(messages)
 
         return response.content
