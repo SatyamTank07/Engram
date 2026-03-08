@@ -1,0 +1,41 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+dist
+build
+
+# Virtual environments
+.venv
+venv
+env
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose*.yml
+.dockerignore
+
+# Docs
+*.md
+LICENSE
+
+# Uploads (mounted as volume in production)
+backend/uploads
+
+# Frontend (not needed in backend image)
+frontend/node_modules
+frontend/.next
+frontend/dist
