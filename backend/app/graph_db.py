@@ -6,6 +6,7 @@ Replaces PostgreSQL-based PersonIdentity CRUD with graph-native operations.
 import asyncio
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -57,10 +58,10 @@ async def init_graph_db():
             "CREATE INDEX person_user_id IF NOT EXISTS "
             "FOR (p:Person) ON (p.user_id)"
         )
-        # Index on Person.name for search
+        # Full-text index on Person.name for case-insensitive search
         await session.run(
-            "CREATE INDEX person_name IF NOT EXISTS "
-            "FOR (p:Person) ON (p.name)"
+            "CREATE FULLTEXT INDEX person_name_fulltext IF NOT EXISTS "
+            "FOR (p:Person) ON EACH [p.name]"
         )
 
 
@@ -201,13 +202,15 @@ async def update_person_node(
 
 
 async def delete_person_node(person_id: str) -> bool:
-    """Delete a Person node and all its relationships."""
-    # Delete embeddings from pgvector first
-    try:
-        from . import vector_db
-        vector_db.delete_embedding(person_id)
-    except Exception as e:
-        print(f"Warning: Failed to delete embedding for {person_id}: {e}")
+    """Delete a Person node and all its relationships.
+
+    Deletes the Neo4j node first (authoritative), then cleans up
+    the pgvector embedding. If embedding cleanup fails, it is queued
+    for background retry.
+    """
+    # Get user_id before deleting (needed for pending sync queue)
+    person = await get_person_node(person_id)
+    user_id = person.get("user_id", "") if person else ""
 
     driver = _get_driver()
     async with driver.session() as session:
@@ -216,7 +219,21 @@ async def delete_person_node(person_id: str) -> bool:
             id=person_id,
         )
         record = await result.single()
-        return record and record["deleted"] > 0
+        deleted = record and record["deleted"] > 0
+
+    if deleted:
+        try:
+            from . import vector_db
+            vector_db.delete_embedding(person_id)
+        except Exception as e:
+            print(f"Warning: Failed to delete embedding for {person_id}: {e}. Queued for retry.")
+            try:
+                from . import vector_db
+                vector_db.insert_pending_sync(person_id, user_id, operation="delete")
+            except Exception as queue_err:
+                print(f"Error: Could not queue pending delete for {person_id}: {queue_err}")
+
+    return deleted
 
 
 async def get_person_nodes_batch(person_ids: list[str]) -> dict[str, dict]:
@@ -238,17 +255,26 @@ async def get_person_nodes_batch(person_ids: list[str]) -> dict[str, dict]:
 
 
 async def search_persons(user_id: str, search_term: str) -> list[dict]:
-    """Search Person nodes by name (case-insensitive partial match)."""
+    """Search Person nodes by name using full-text index (case-insensitive)."""
+    if not search_term or not search_term.strip():
+        return []
+
     driver = _get_driver()
+    escaped = _escape_lucene_query(search_term.strip())
+    # Wildcard prefix/suffix for substring-like matching
+    lucene_query = f"*{escaped}*"
+
     async with driver.session() as session:
         result = await session.run(
             """
-            MATCH (p:Person {user_id: $user_id})
-            WHERE toLower(p.name) CONTAINS toLower($search_term)
+            CALL db.index.fulltext.queryNodes('person_name_fulltext', $query)
+            YIELD node AS p, score
+            WHERE p.user_id = $user_id
             RETURN p
+            ORDER BY score DESC
             """,
+            query=lucene_query,
             user_id=str(user_id),
-            search_term=search_term,
         )
         records = [record async for record in result]
         return [_node_to_dict(record["p"]) for record in records]
@@ -330,6 +356,14 @@ async def get_relationships(person_id: str) -> list[dict]:
 # ---------------------
 
 
+_LUCENE_SPECIAL_CHARS = re.compile(r'([+\-&|!(){}[\]^"~*?:\\])')
+
+
+def _escape_lucene_query(query: str) -> str:
+    """Escape Lucene special characters in a search term."""
+    return _LUCENE_SPECIAL_CHARS.sub(r"\\\1", query)
+
+
 def _node_to_dict(node) -> dict:
     """Convert a Neo4j node to a plain dictionary."""
     data = dict(node)
@@ -360,7 +394,8 @@ def _sanitize_rel_type(rel_type: str) -> str:
 def _sync_embedding(person: dict):
     """Sync person data to pgvector as a text embedding.
 
-    Runs in a try/except so embedding failures don't break person CRUD.
+    On failure, queues the sync for background retry so that Neo4j
+    and pgvector stay eventually consistent.
     """
     try:
         from . import embedding_service, vector_db
@@ -379,4 +414,13 @@ def _sync_embedding(person: dict):
         )
         print(f"[EMBEDDING] Synced embedding for '{person.get('name')}': \"{text_content[:80]}...\"")
     except Exception as e:
-        print(f"Warning: Failed to sync embedding for person {person.get('id')}: {e}")
+        print(f"Warning: Failed to sync embedding for person {person.get('id')}: {e}. Queued for retry.")
+        try:
+            from . import vector_db
+            vector_db.insert_pending_sync(
+                person_id=person["id"],
+                user_id=person["user_id"],
+                operation="upsert",
+            )
+        except Exception as queue_err:
+            print(f"Error: Could not queue pending sync for {person.get('id')}: {queue_err}")

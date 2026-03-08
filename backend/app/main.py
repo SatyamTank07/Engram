@@ -2,6 +2,7 @@
 FastAPI main application with chat endpoints.
 """
 
+import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -21,7 +22,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from . import crud, schemas, database, agent, auth, graph_db, vector_db, face_service
+from . import crud, schemas, database, agent, auth, graph_db, vector_db, face_service, sync_worker
 
 # File upload constraints
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
@@ -57,7 +58,18 @@ async def lifespan(app):
         print("Neo4j knowledge graph initialized successfully.")
     except Exception as e:
         print(f"Warning: Could not initialize Neo4j: {e}. Person identity features may not work.")
+
+    # Start background embedding sync worker
+    sync_task = asyncio.create_task(sync_worker.run_sync_worker())
+
     yield
+
+    # Shutdown: cancel sync worker, close connections
+    sync_task.cancel()
+    try:
+        await sync_task
+    except asyncio.CancelledError:
+        pass
     await graph_db.Neo4jConnection.close()
     vector_db.close_pool()
 
@@ -100,6 +112,15 @@ def readiness_check():
     if not face_service.is_model_ready():
         return Response(status_code=503, content="Face model loading...")
     return {"status": "ready"}
+
+
+@app.get("/admin/pending-syncs")
+async def pending_sync_stats(
+    current_user: database.User = Depends(auth.get_current_user),
+):
+    """Return counts of pending/failed embedding sync operations."""
+    stats = await run_in_threadpool(vector_db.get_pending_sync_stats)
+    return stats
 
 
 # Authentication endpoints
@@ -278,7 +299,7 @@ def delete_session(
 
 @app.post("/api/chat", response_model=schemas.ChatResponse)
 @limiter.limit("20/minute")
-def chat(
+async def chat(
     request: Request,
     chat_request: schemas.ChatRequest,
     current_user: database.User = Depends(auth.get_current_user),
@@ -291,17 +312,17 @@ def chat(
     session = crud.get_session(db, chat_request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     if session.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     # Get chat history
     messages = crud.get_session_messages(db, chat_request.session_id)
     chat_history = [
         {"role": msg.role, "content": msg.content}
         for msg in messages
     ]
-    
+
     # Save user message
     user_message = crud.save_message(
         db,
@@ -310,21 +331,21 @@ def chat(
         chat_request.message,
         image_url=chat_request.image_url,
     )
-    
+
     # Update session title if this is the first message
     if len(messages) == 0:
         title = chat_request.message[:50]
         if len(chat_request.message) > 50:
             title += "..."
         crud.update_session_title(db, chat_request.session_id, title)
-    
+
     try:
-        # Get AI response
-        ai_response = agent.get_agent_response(
+        # Get AI response (async — tools natively await Neo4j on this event loop)
+        ai_response = await agent.get_agent_response(
             chat_request.message, chat_history, chat_request.image_url,
             user_id=str(current_user.id),
         )
-        
+
         # Save assistant message
         assistant_message = crud.save_message(
             db,
@@ -332,13 +353,13 @@ def chat(
             "assistant",
             ai_response
         )
-        
+
         return schemas.ChatResponse(
             session_id=chat_request.session_id,
             user_message=user_message,
             assistant_message=assistant_message
         )
-    
+
     except Exception as e:
         # If AI fails, still return user message but with error
         raise HTTPException(status_code=500, detail=str(e))

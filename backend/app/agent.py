@@ -147,10 +147,10 @@ class StorePersonFaceInput(BaseModel):
 # The LLM never sees or controls user_id.
 # ---------------------------------------------------------------------------
 def _make_tools(user_id: str):
-    """Return a list of LangChain tools bound to the authenticated user_id."""
+    """Return a list of async LangChain tools bound to the authenticated user_id."""
 
     @tool(args_schema=CreatePersonInput)
-    def create_person(
+    async def create_person(
         name: str,
         aliases: List[str] = [],
         contacts: Dict[str, Any] = {},
@@ -158,10 +158,10 @@ def _make_tools(user_id: str):
         trust_score: float = 0.0,
     ) -> dict:
         """Create a new person identity in the database."""
-        return create_person_tool(user_id, name=name, aliases=aliases, contacts=contacts, short_bio=short_bio, trust_score=trust_score)
+        return await create_person_tool(user_id, name=name, aliases=aliases, contacts=contacts, short_bio=short_bio, trust_score=trust_score)
 
     @tool(args_schema=UpdatePersonInput)
-    def update_person(
+    async def update_person(
         person_id: str,
         name: Optional[str] = None,
         aliases: Optional[List[str]] = None,
@@ -170,52 +170,52 @@ def _make_tools(user_id: str):
         trust_score: Optional[float] = None,
     ) -> dict:
         """Update an existing person's information."""
-        return update_person_tool(user_id, person_id=person_id, name=name, aliases=aliases, contacts=contacts, short_bio=short_bio, trust_score=trust_score)
+        return await update_person_tool(user_id, person_id=person_id, name=name, aliases=aliases, contacts=contacts, short_bio=short_bio, trust_score=trust_score)
 
     @tool(args_schema=GetPersonInput)
-    def get_person(person_id: str) -> dict:
+    async def get_person(person_id: str) -> dict:
         """Get details of a specific person by their ID."""
-        return get_person_tool(user_id, person_id)
+        return await get_person_tool(user_id, person_id)
 
     @tool(args_schema=ListPersonsInput)
-    def list_persons(limit: Optional[int] = 50) -> dict:
+    async def list_persons(limit: Optional[int] = 50) -> dict:
         """List all saved persons for the current user."""
-        return list_persons_tool(user_id, limit)
+        return await list_persons_tool(user_id, limit)
 
     @tool(args_schema=DeletePersonInput)
-    def delete_person(person_id: str) -> dict:
+    async def delete_person(person_id: str) -> dict:
         """Delete a person from the database."""
-        return delete_person_tool(user_id, person_id)
+        return await delete_person_tool(user_id, person_id)
 
     @tool(args_schema=SearchPersonInput)
-    def search_person(search_term: str) -> dict:
+    async def search_person(search_term: str) -> dict:
         """Search for persons by name."""
-        return search_person_tool(user_id, search_term)
+        return await search_person_tool(user_id, search_term)
 
     @tool(args_schema=AddRelationshipInput)
-    def add_relationship(
+    async def add_relationship(
         from_person_name: str,
         to_person_name: str,
         relationship_type: str,
         notes: Optional[str] = None,
     ) -> dict:
         """Create a relationship between two people in the knowledge graph. Both persons must already exist."""
-        return add_relationship_tool(user_id, from_person_name=from_person_name, to_person_name=to_person_name, relationship_type=relationship_type, notes=notes)
+        return await add_relationship_tool(user_id, from_person_name=from_person_name, to_person_name=to_person_name, relationship_type=relationship_type, notes=notes)
 
     @tool(args_schema=GetRelationshipsInput)
-    def get_relationships(person_name: str) -> dict:
+    async def get_relationships(person_name: str) -> dict:
         """Get all relationships for a person — shows how they are connected to others."""
-        return get_relationships_tool(user_id, person_name)
+        return await get_relationships_tool(user_id, person_name)
 
     @tool(args_schema=IdentifyFaceInput)
-    def identify_face(image_url: str) -> dict:
+    async def identify_face(image_url: str) -> dict:
         """Detect and identify all faces in an uploaded image. Returns per-face results with bounding boxes, detection scores, and matched persons with confidence scores."""
-        return identify_face_from_url_tool(user_id, image_url)
+        return await identify_face_from_url_tool(user_id, image_url)
 
     @tool(args_schema=StorePersonFaceInput)
-    def store_person_face(person_id: str, image_url: str) -> dict:
+    async def store_person_face(person_id: str, image_url: str) -> dict:
         """Store a face embedding for a person from an uploaded chat image. Call this after creating or finding a person when the user wants to link their face from an uploaded photo."""
-        return store_person_face_tool(user_id, person_id, image_url)
+        return await store_person_face_tool(user_id, person_id, image_url)
 
     return [
         create_person,
@@ -296,14 +296,14 @@ def format_chat_history(messages: list[dict]) -> list:
 MAX_TOOL_ITERATIONS = 10
 
 
-def get_agent_response(
+async def get_agent_response(
     user_message: str,
     chat_history: list[dict] = None,
     image_url: str | None = None,
     user_id: str | None = None,
 ) -> str:
     """
-    Get a response from the AI agent.
+    Get a response from the AI agent (async).
 
     Args:
         user_message: The user's input message
@@ -335,7 +335,7 @@ def get_agent_response(
         messages.append(HumanMessage(content=user_message))
 
         # Get response from the model
-        response = llm_with_tools.invoke(messages)
+        response = await llm_with_tools.ainvoke(messages)
 
         # Handle tool calls with iteration limit
         iterations = 0
@@ -351,7 +351,7 @@ def get_agent_response(
 
                 if selected_tool:
                     try:
-                        tool_result = selected_tool.invoke(tool_args)
+                        tool_result = await selected_tool.ainvoke(tool_args)
                         content = json.dumps(tool_result)
                     except Exception as e:
                         content = f"Error executing tool {tool_name}: {str(e)}"
@@ -360,7 +360,7 @@ def get_agent_response(
 
                 messages.append(ToolMessage(content=content, tool_call_id=tool_call["id"]))
 
-            response = llm_with_tools.invoke(messages)
+            response = await llm_with_tools.ainvoke(messages)
 
         # If we exhausted iterations but the LLM still wants to call tools,
         # force a final response explaining the limit was reached.
@@ -375,7 +375,7 @@ def get_agent_response(
                         tool_call_id=tool_call["id"],
                     )
                 )
-            response = llm_with_tools.invoke(messages)
+            response = await llm_with_tools.ainvoke(messages)
 
         return response.content
 
