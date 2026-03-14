@@ -2,9 +2,12 @@
 Database models and connection for FastAPI backend.
 """
 
+import logging
 import os
 import uuid
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey, Boolean, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
@@ -65,7 +68,12 @@ class ChatMessage(Base):
 
 def init_db():
     """Initialize database tables."""
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables initialized successfully")
+    except Exception as e:
+        logger.critical("Failed to initialize database tables: %s", e)
+        raise
 
 
 def get_db():

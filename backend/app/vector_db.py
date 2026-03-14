@@ -5,10 +5,13 @@ Manages the person_embeddings table in PostgreSQL with the pgvector extension.
 Provides upsert, delete, and semantic similarity search.
 """
 
+import logging
 import os
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -42,6 +45,7 @@ def _get_pool() -> ThreadedConnectionPool:
     """Return the connection pool, creating it on first use."""
     global _pool
     if _pool is None:
+        logger.info("Creating pgvector connection pool (min=%d, max=%d)", DB_POOL_MIN, DB_POOL_MAX)
         _pool = ThreadedConnectionPool(DB_POOL_MIN, DB_POOL_MAX, DATABASE_URL)
     return _pool
 
@@ -70,6 +74,7 @@ def close_pool():
     if _pool is not None:
         _pool.closeall()
         _pool = None
+        logger.info("pgvector connection pool closed")
 
 
 def init_vector_db():
@@ -78,6 +83,7 @@ def init_vector_db():
     Called once on application startup.
     Uses register_vec=False since the vector extension may not exist yet.
     """
+    logger.info("Initializing pgvector schema...")
     with _pooled_connection(register_vec=False) as conn:
         with conn.cursor() as cur:
             # Enable the vector extension — must happen BEFORE any vector type usage
@@ -144,6 +150,7 @@ def init_vector_db():
             """)
 
         conn.commit()
+    logger.info("pgvector schema ready")
 
 
 def upsert_text_embedding(
@@ -156,29 +163,33 @@ def upsert_text_embedding(
     Insert or update the text embedding for a person.
     Uses ON CONFLICT for idempotent upserts.
     """
-    with _pooled_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO person_embeddings
-                    (id, person_id, user_id, text_content, text_embedding, updated_at)
-                VALUES
-                    (%s, %s, %s, %s, %s::vector, %s)
-                ON CONFLICT (person_id) DO UPDATE SET
-                    text_content = EXCLUDED.text_content,
-                    text_embedding = EXCLUDED.text_embedding,
-                    updated_at = EXCLUDED.updated_at
-                """,
-                (
-                    str(uuid.uuid4()),
-                    person_id,
-                    user_id,
-                    text_content,
-                    str(embedding),
-                    datetime.now(timezone.utc),
-                ),
-            )
-        conn.commit()
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO person_embeddings
+                        (id, person_id, user_id, text_content, text_embedding, updated_at)
+                    VALUES
+                        (%s, %s, %s, %s, %s::vector, %s)
+                    ON CONFLICT (person_id) DO UPDATE SET
+                        text_content = EXCLUDED.text_content,
+                        text_embedding = EXCLUDED.text_embedding,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        person_id,
+                        user_id,
+                        text_content,
+                        str(embedding),
+                        datetime.now(timezone.utc),
+                    ),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to upsert text embedding for person_id=%s: %s", person_id, e)
+        raise
 
 
 def upsert_face_embedding(person_id: str, user_id: str, face_vector: list[float]):
@@ -187,21 +198,25 @@ def upsert_face_embedding(person_id: str, user_id: str, face_vector: list[float]
     Only updates the face_embedding column — text_embedding is untouched.
     Creates a row if none exists yet (person may not have a text embedding yet).
     """
-    with _pooled_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO person_embeddings
-                    (id, person_id, user_id, face_embedding, updated_at)
-                VALUES
-                    (%s, %s, %s, %s::vector, NOW())
-                ON CONFLICT (person_id) DO UPDATE SET
-                    face_embedding = EXCLUDED.face_embedding,
-                    updated_at = NOW()
-                """,
-                (str(uuid.uuid4()), person_id, user_id, str(face_vector)),
-            )
-        conn.commit()
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO person_embeddings
+                        (id, person_id, user_id, face_embedding, updated_at)
+                    VALUES
+                        (%s, %s, %s, %s::vector, NOW())
+                    ON CONFLICT (person_id) DO UPDATE SET
+                        face_embedding = EXCLUDED.face_embedding,
+                        updated_at = NOW()
+                    """,
+                    (str(uuid.uuid4()), person_id, user_id, str(face_vector)),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to upsert face embedding for person_id=%s: %s", person_id, e)
+        raise
 
 
 def face_search(
@@ -218,31 +233,35 @@ def face_search(
     Returns a list of dicts with person_id and similarity_score
     (0.0 to 1.0, higher = better match), sorted by similarity descending.
     """
-    with _pooled_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
-            cur.execute(
-                """
-                SELECT
-                    person_id,
-                    1 - (face_embedding <=> %s::vector) AS similarity_score
-                FROM person_embeddings
-                WHERE user_id = %s
-                  AND face_embedding IS NOT NULL
-                ORDER BY face_embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (str(query_face_vector), user_id, str(query_face_vector), limit),
-            )
-            rows = cur.fetchall()
-            return [
-                {
-                    "person_id": row["person_id"],
-                    "similarity_score": round(float(row["similarity_score"]), 4),
-                }
-                for row in rows
-                if float(row["similarity_score"]) >= min_score
-            ]
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
+                cur.execute(
+                    """
+                    SELECT
+                        person_id,
+                        1 - (face_embedding <=> %s::vector) AS similarity_score
+                    FROM person_embeddings
+                    WHERE user_id = %s
+                      AND face_embedding IS NOT NULL
+                    ORDER BY face_embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (str(query_face_vector), user_id, str(query_face_vector), limit),
+                )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "person_id": row["person_id"],
+                        "similarity_score": round(float(row["similarity_score"]), 4),
+                    }
+                    for row in rows
+                    if float(row["similarity_score"]) >= min_score
+                ]
+    except Exception as e:
+        logger.error("Face search failed for user_id=%s: %s", user_id, e)
+        raise
 
 
 def face_search_batch(
@@ -290,34 +309,42 @@ def face_search_batch(
         ORDER BY q.face_idx, similarity_score DESC
     """
 
-    with _pooled_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
-            cur.execute(query, params)
-            rows = cur.fetchall()
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
+                cur.execute(query, params)
+                rows = cur.fetchall()
 
-    # Group results by face index
-    results: list[list[dict]] = [[] for _ in query_face_vectors]
-    for row in rows:
-        score = round(float(row["similarity_score"]), 4)
-        if score >= min_score:
-            results[int(row["face_idx"])].append({
-                "person_id": row["person_id"],
-                "similarity_score": score,
-            })
+        # Group results by face index
+        results: list[list[dict]] = [[] for _ in query_face_vectors]
+        for row in rows:
+            score = round(float(row["similarity_score"]), 4)
+            if score >= min_score:
+                results[int(row["face_idx"])].append({
+                    "person_id": row["person_id"],
+                    "similarity_score": score,
+                })
 
-    return results
+        return results
+    except Exception as e:
+        logger.error("Batch face search failed: %s", e)
+        raise
 
 
 def delete_embedding(person_id: str):
     """Delete the embedding record for a person."""
-    with _pooled_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM person_embeddings WHERE person_id = %s",
-                (person_id,),
-            )
-        conn.commit()
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM person_embeddings WHERE person_id = %s",
+                    (person_id,),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to delete embedding for person_id=%s: %s", person_id, e)
+        raise
 
 
 def semantic_search(
@@ -331,32 +358,36 @@ def semantic_search(
     Returns a list of dicts with person_id, text_content, and similarity_score
     (0.0 to 1.0, higher = more similar), sorted by similarity descending.
     """
-    with _pooled_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
-            cur.execute(
-                """
-                SELECT
-                    person_id,
-                    text_content,
-                    1 - (text_embedding <=> %s::vector) AS similarity_score
-                FROM person_embeddings
-                WHERE user_id = %s
-                  AND text_embedding IS NOT NULL
-                ORDER BY text_embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (str(query_embedding), user_id, str(query_embedding), limit),
-            )
-            rows = cur.fetchall()
-            return [
-                {
-                    "person_id": row["person_id"],
-                    "text_content": row["text_content"],
-                    "similarity_score": round(float(row["similarity_score"]), 4),
-                }
-                for row in rows
-            ]
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
+                cur.execute(
+                    """
+                    SELECT
+                        person_id,
+                        text_content,
+                        1 - (text_embedding <=> %s::vector) AS similarity_score
+                    FROM person_embeddings
+                    WHERE user_id = %s
+                      AND text_embedding IS NOT NULL
+                    ORDER BY text_embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (str(query_embedding), user_id, str(query_embedding), limit),
+                )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "person_id": row["person_id"],
+                        "text_content": row["text_content"],
+                        "similarity_score": round(float(row["similarity_score"]), 4),
+                    }
+                    for row in rows
+                ]
+    except Exception as e:
+        logger.error("Semantic search failed for user_id=%s: %s", user_id, e)
+        raise
 
 
 # ---------------------

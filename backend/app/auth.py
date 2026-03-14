@@ -3,10 +3,13 @@ Authentication utilities for JWT tokens, password hashing,
 refresh-token encryption and httpOnly cookie management.
 """
 
+import logging
 import os
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from cryptography.fernet import Fernet, InvalidToken
 from jose import JWTError, jwt
@@ -72,7 +75,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 def decode_access_token(token: str) -> dict:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except JWTError as e:
+        logger.warning("Invalid access token: %s", type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "INVALID_TOKEN", "message": "Could not validate credentials"},
@@ -86,7 +90,8 @@ def decode_access_token_no_expiry(token: str) -> dict:
             token, SECRET_KEY, algorithms=[ALGORITHM],
             options={"verify_exp": False},
         )
-    except JWTError:
+    except JWTError as e:
+        logger.warning("Failed to decode access token (no-expiry mode): %s", type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "INVALID_TOKEN", "message": "Could not validate credentials"},
@@ -107,6 +112,7 @@ def create_refresh_token(db: Session, user_id) -> str:
         "refresh_token_expires_at": expires_at,
     })
     db.commit()
+    logger.debug("Refresh token created for user_id=%s", user_id)
     return raw_token
 
 
@@ -114,12 +120,14 @@ def verify_refresh_token(db: Session, raw_token: str, user_id: str) -> database.
     """Decrypt the stored refresh token and compare with the provided one."""
     user = db.query(database.User).filter(database.User.id == user_id).first()
     if not user or not user.refresh_token_encrypted:
+        logger.warning("Refresh token verification failed: user not found or no token stored, user_id=%s", user_id)
         raise HTTPException(
             status_code=401,
             detail={"code": "INVALID_REFRESH_TOKEN", "message": "Invalid refresh token"},
         )
 
     if user.refresh_token_expires_at and user.refresh_token_expires_at < datetime.utcnow():
+        logger.warning("Refresh token expired for user_id=%s", user_id)
         raise HTTPException(
             status_code=401,
             detail={"code": "REFRESH_TOKEN_EXPIRED", "message": "Refresh token has expired"},
@@ -128,12 +136,14 @@ def verify_refresh_token(db: Session, raw_token: str, user_id: str) -> database.
     try:
         stored_token = _fernet.decrypt(user.refresh_token_encrypted.encode()).decode()
     except InvalidToken:
+        logger.warning("Refresh token decryption failed for user_id=%s", user_id)
         raise HTTPException(
             status_code=401,
             detail={"code": "INVALID_REFRESH_TOKEN", "message": "Invalid refresh token"},
         )
 
     if not secrets.compare_digest(stored_token, raw_token):
+        logger.warning("Refresh token mismatch for user_id=%s", user_id)
         raise HTTPException(
             status_code=401,
             detail={"code": "INVALID_REFRESH_TOKEN", "message": "Invalid refresh token"},
@@ -149,6 +159,7 @@ def revoke_refresh_token(db: Session, user_id) -> None:
         "refresh_token_expires_at": None,
     })
     db.commit()
+    logger.info("Refresh token revoked for user_id=%s", user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +207,7 @@ def get_current_user(
     if not token and credentials:
         token = credentials.credentials
     if not token:
+        logger.warning("Authentication failed: no token provided")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "NOT_AUTHENTICATED", "message": "Authentication required"},
@@ -204,6 +216,7 @@ def get_current_user(
     payload = decode_access_token(token)
     user_id: str = payload.get("sub")
     if user_id is None:
+        logger.warning("Authentication failed: token has no 'sub' claim")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "INVALID_TOKEN", "message": "Access token is invalid"},
@@ -211,6 +224,7 @@ def get_current_user(
 
     user = db.query(database.User).filter(database.User.id == user_id).first()
     if user is None:
+        logger.warning("Authentication failed: user not found for id=%s", user_id)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "USER_NOT_FOUND", "message": "User associated with this token no longer exists"},

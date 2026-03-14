@@ -18,6 +18,8 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
     const [imageError, setImageError] = useState('');
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
+    // Tracks whether a send is in-flight so loadMessages won't overwrite optimistic updates
+    const isSendingRef = useRef(false);
 
     // Stable preview URL — created once per file, revoked on change/unmount
     const previewUrl = useMemo(() => {
@@ -51,7 +53,10 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
 
         try {
             const data = await getSessionMessages(sessionId);
-            setMessages(data);
+            // Don't overwrite optimistic messages while a send is in-flight
+            if (!isSendingRef.current) {
+                setMessages(data);
+            }
         } catch (error) {
             console.error('Failed to load messages:', error);
         }
@@ -82,6 +87,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
         setAttachedImage(null);
         setImageError('');
         setLoading(true);
+        isSendingRef.current = true;
 
         // Optimistic: show user message immediately
         const tempUserMessage: Message = {
@@ -128,6 +134,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                         data.user_message,
                         data.assistant_message,
                     ]);
+                    isSendingRef.current = false;
                     setLoading(false);
                     if (localImageUrl) URL.revokeObjectURL(localImageUrl);
                 },
@@ -141,6 +148,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                                 : m
                         )
                     );
+                    isSendingRef.current = false;
                     setLoading(false);
                     if (localImageUrl) URL.revokeObjectURL(localImageUrl);
                 },
@@ -155,6 +163,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                         : m
                 )
             );
+            isSendingRef.current = false;
             setLoading(false);
             if (localImageUrl) URL.revokeObjectURL(localImageUrl);
         }

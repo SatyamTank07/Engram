@@ -5,6 +5,7 @@ Replaces PostgreSQL-based PersonIdentity CRUD with graph-native operations.
 
 import asyncio
 import json
+import logging
 import os
 import re
 import uuid
@@ -12,6 +13,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from neo4j import AsyncGraphDatabase
+
+logger = logging.getLogger(__name__)
 
 
 # Neo4j connection settings
@@ -28,6 +31,7 @@ class Neo4jConnection:
     @classmethod
     def get_driver(cls):
         if cls._driver is None:
+            logger.info("Connecting to Neo4j at %s", NEO4J_URI)
             cls._driver = AsyncGraphDatabase.driver(
                 NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD)
             )
@@ -38,6 +42,7 @@ class Neo4jConnection:
         if cls._driver is not None:
             await cls._driver.close()
             cls._driver = None
+            logger.info("Neo4j connection closed")
 
 
 def _get_driver():
@@ -46,6 +51,7 @@ def _get_driver():
 
 async def init_graph_db():
     """Create indexes and constraints for the Person nodes."""
+    logger.info("Initializing Neo4j schema (constraints + indexes)...")
     driver = _get_driver()
     async with driver.session() as session:
         # Unique constraint on Person.id
@@ -63,6 +69,7 @@ async def init_graph_db():
             "CREATE FULLTEXT INDEX person_name_fulltext IF NOT EXISTS "
             "FOR (p:Person) ON EACH [p.name]"
         )
+    logger.info("Neo4j schema ready")
 
 
 # ---------------------
@@ -83,37 +90,41 @@ async def create_person_node(
     now = datetime.now(timezone.utc).isoformat()
     person_id = str(uuid.uuid4())
 
-    async with driver.session() as session:
-        result = await session.run(
-            """
-            CREATE (p:Person {
-                id: $id,
-                user_id: $user_id,
-                name: $name,
-                aliases: $aliases,
-                contacts: $contacts,
-                short_bio: $short_bio,
-                trust_score: $trust_score,
-                first_seen: $now,
-                last_seen: $now
-            })
-            RETURN p
-            """,
-            id=person_id,
-            user_id=str(user_id),
-            name=name,
-            aliases=aliases or [],
-            contacts=_serialize_contacts(contacts or {}),
-            short_bio=short_bio or "",
-            trust_score=str(trust_score),
-            now=now,
-        )
-        record = await result.single()
-        if record:
-            person = _node_to_dict(record["p"])
-            await asyncio.to_thread(_sync_embedding, person)
-            return person
-    return {}
+    try:
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                CREATE (p:Person {
+                    id: $id,
+                    user_id: $user_id,
+                    name: $name,
+                    aliases: $aliases,
+                    contacts: $contacts,
+                    short_bio: $short_bio,
+                    trust_score: $trust_score,
+                    first_seen: $now,
+                    last_seen: $now
+                })
+                RETURN p
+                """,
+                id=person_id,
+                user_id=str(user_id),
+                name=name,
+                aliases=aliases or [],
+                contacts=_serialize_contacts(contacts or {}),
+                short_bio=short_bio or "",
+                trust_score=str(trust_score),
+                now=now,
+            )
+            record = await result.single()
+            if record:
+                person = _node_to_dict(record["p"])
+                await asyncio.to_thread(_sync_embedding, person)
+                return person
+        return {}
+    except Exception as e:
+        logger.error("Failed to create person node '%s': %s", name, e)
+        raise
 
 
 async def get_person_node(person_id: str) -> dict | None:
@@ -212,26 +223,30 @@ async def delete_person_node(person_id: str) -> bool:
     person = await get_person_node(person_id)
     user_id = person.get("user_id", "") if person else ""
 
-    driver = _get_driver()
-    async with driver.session() as session:
-        result = await session.run(
-            "MATCH (p:Person {id: $id}) DETACH DELETE p RETURN count(p) AS deleted",
-            id=person_id,
-        )
-        record = await result.single()
-        deleted = record and record["deleted"] > 0
+    try:
+        driver = _get_driver()
+        async with driver.session() as session:
+            result = await session.run(
+                "MATCH (p:Person {id: $id}) DETACH DELETE p RETURN count(p) AS deleted",
+                id=person_id,
+            )
+            record = await result.single()
+            deleted = record and record["deleted"] > 0
+    except Exception as e:
+        logger.error("Failed to delete person node %s: %s", person_id, e)
+        raise
 
     if deleted:
         try:
             from . import vector_db
             vector_db.delete_embedding(person_id)
         except Exception as e:
-            print(f"Warning: Failed to delete embedding for {person_id}: {e}. Queued for retry.")
+            logger.warning("Failed to delete embedding for person_id=%s: %s. Queued for retry.", person_id, e)
             try:
                 from . import vector_db
                 vector_db.insert_pending_sync(person_id, user_id, operation="delete")
             except Exception as queue_err:
-                print(f"Error: Could not queue pending delete for {person_id}: {queue_err}")
+                logger.error("Could not queue pending delete for person_id=%s: %s", person_id, queue_err)
 
     return deleted
 
@@ -264,20 +279,24 @@ async def search_persons(user_id: str, search_term: str) -> list[dict]:
     # Wildcard prefix/suffix for substring-like matching
     lucene_query = f"*{escaped}*"
 
-    async with driver.session() as session:
-        result = await session.run(
-            """
-            CALL db.index.fulltext.queryNodes('person_name_fulltext', $query)
-            YIELD node AS p, score
-            WHERE p.user_id = $user_id
-            RETURN p
-            ORDER BY score DESC
-            """,
-            query=lucene_query,
-            user_id=str(user_id),
-        )
-        records = [record async for record in result]
-        return [_node_to_dict(record["p"]) for record in records]
+    try:
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                CALL db.index.fulltext.queryNodes('person_name_fulltext', $query)
+                YIELD node AS p, score
+                WHERE p.user_id = $user_id
+                RETURN p
+                ORDER BY score DESC
+                """,
+                query=lucene_query,
+                user_id=str(user_id),
+            )
+            records = [record async for record in result]
+            return [_node_to_dict(record["p"]) for record in records]
+    except Exception as e:
+        logger.error("Person search failed for term '%s': %s", search_term, e)
+        raise
 
 
 # ---------------------
@@ -300,27 +319,31 @@ async def add_relationship(
     props = properties or {}
     props["created_at"] = datetime.now(timezone.utc).isoformat()
 
-    async with driver.session() as session:
-        # Use APOC or dynamic relationship type
-        result = await session.run(
-            f"""
-            MATCH (a:Person {{id: $from_id}})
-            MATCH (b:Person {{id: $to_id}})
-            CREATE (a)-[r:{_sanitize_rel_type(rel_type)} $props]->(b)
-            RETURN a.name AS from_name, b.name AS to_name, type(r) AS rel_type
-            """,
-            from_id=from_person_id,
-            to_id=to_person_id,
-            props=props,
-        )
-        record = await result.single()
-        if record:
-            return {
-                "from": record["from_name"],
-                "to": record["to_name"],
-                "relationship": record["rel_type"],
-            }
-    return None
+    try:
+        async with driver.session() as session:
+            # Use APOC or dynamic relationship type
+            result = await session.run(
+                f"""
+                MATCH (a:Person {{id: $from_id}})
+                MATCH (b:Person {{id: $to_id}})
+                CREATE (a)-[r:{_sanitize_rel_type(rel_type)} $props]->(b)
+                RETURN a.name AS from_name, b.name AS to_name, type(r) AS rel_type
+                """,
+                from_id=from_person_id,
+                to_id=to_person_id,
+                props=props,
+            )
+            record = await result.single()
+            if record:
+                return {
+                    "from": record["from_name"],
+                    "to": record["to_name"],
+                    "relationship": record["rel_type"],
+                }
+        return None
+    except Exception as e:
+        logger.error("Failed to add relationship %s->%s (%s): %s", from_person_id, to_person_id, rel_type, e)
+        raise
 
 
 async def get_relationships(person_id: str) -> list[dict]:
@@ -412,9 +435,9 @@ def _sync_embedding(person: dict):
             text_content=text_content,
             embedding=embedding,
         )
-        print(f"[EMBEDDING] Synced embedding for '{person.get('name')}': \"{text_content[:80]}...\"")
+        logger.info("Synced embedding for '%s': \"%s...\"", person.get('name'), text_content[:80])
     except Exception as e:
-        print(f"Warning: Failed to sync embedding for person {person.get('id')}: {e}. Queued for retry.")
+        logger.warning("Failed to sync embedding for person_id=%s: %s. Queued for retry.", person.get('id'), e)
         try:
             from . import vector_db
             vector_db.insert_pending_sync(
@@ -423,4 +446,4 @@ def _sync_embedding(person: dict):
                 operation="upsert",
             )
         except Exception as queue_err:
-            print(f"Error: Could not queue pending sync for {person.get('id')}: {queue_err}")
+            logger.error("Could not queue pending sync for person_id=%s: %s", person.get('id'), queue_err)

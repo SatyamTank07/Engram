@@ -5,10 +5,13 @@ Provides functions to generate text embeddings for person data,
 enabling semantic search via pgvector.
 """
 
+import logging
 import os
 from typing import Optional
 
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 
 # Embedding model configuration
 EMBEDDING_MODEL = "text-embedding-3-small"
@@ -25,6 +28,7 @@ def get_openai_client() -> OpenAI:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
+        logger.info("Initializing OpenAI client for embeddings")
         _client = OpenAI(api_key=api_key)
     return _client
 
@@ -70,12 +74,17 @@ def generate_text_embedding(text: str) -> list[float]:
 
     Calls the OpenAI text-embedding-3-small API.
     """
-    client = get_openai_client()
-    response = client.embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=text,
-    )
-    return response.data[0].embedding
+    try:
+        client = get_openai_client()
+        response = client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=text,
+        )
+        logger.debug("Generated embedding for text of length %d", len(text))
+        return response.data[0].embedding
+    except Exception as e:
+        logger.error("OpenAI embedding API call failed: %s", e)
+        raise
 
 
 def generate_person_embedding(
@@ -90,6 +99,7 @@ def generate_person_embedding(
     Returns:
         (text_content, embedding_vector) — the raw text and its 1536-dim vector.
     """
+    logger.debug("Generating embedding for person: %s", name)
     text_content = build_person_text(name, aliases, short_bio, contacts)
     embedding = generate_text_embedding(text_content)
     return text_content, embedding

@@ -59,16 +59,23 @@ def generate_face_embedding(image_bytes: bytes) -> list[float]:
     Raises ValueError if no face is detected.
     Use detect_and_embed_all_faces() for group photos.
     """
-    app = get_face_app()
-    img = _bytes_to_cv2(image_bytes)
-    faces = app.get(img)
+    try:
+        app = get_face_app()
+        img = _bytes_to_cv2(image_bytes)
+        faces = app.get(img)
 
-    if not faces:
-        raise ValueError("No face detected in the image")
+        if not faces:
+            raise ValueError("No face detected in the image")
 
-    # Pick the largest face (by bounding-box area)
-    face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-    return face.embedding.tolist()
+        logger.debug("Face detection: found %d face(s), using largest", len(faces))
+        # Pick the largest face (by bounding-box area)
+        face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        return face.embedding.tolist()
+    except ValueError:
+        raise
+    except Exception as e:
+        logger.error("Face detection failed: %s", e)
+        raise
 
 
 def detect_and_embed_all_faces(image_bytes: bytes) -> list[dict]:
@@ -82,10 +89,15 @@ def detect_and_embed_all_faces(image_bytes: bytes) -> list[dict]:
 
     Returns empty list if no faces are detected.
     """
-    app = get_face_app()
-    img = _bytes_to_cv2(image_bytes)
-    faces = app.get(img)
+    try:
+        app = get_face_app()
+        img = _bytes_to_cv2(image_bytes)
+        faces = app.get(img)
+    except Exception as e:
+        logger.error("Multi-face detection failed: %s", e)
+        raise
 
+    logger.debug("Multi-face detection: found %d face(s)", len(faces))
     results = []
     for face in faces:
         results.append({
@@ -112,11 +124,17 @@ async def identify_faces_in_image(image_bytes: bytes, user_id: str) -> dict:
     import asyncio
     from . import vector_db, graph_db
 
-    # CPU-bound face detection — run in thread to avoid blocking the event loop
-    detected_faces = await asyncio.to_thread(detect_and_embed_all_faces, image_bytes)
+    try:
+        # CPU-bound face detection — run in thread to avoid blocking the event loop
+        detected_faces = await asyncio.to_thread(detect_and_embed_all_faces, image_bytes)
+    except Exception as e:
+        logger.error("Face identification pipeline failed: %s", e)
+        raise
 
     if not detected_faces:
         return {"faces_detected": 0, "faces": [], "message": "No faces detected in the image"}
+
+    logger.info("Face identification: detected=%d, user_id=%s", len(detected_faces), user_id)
 
     # Step A: Batch vector search — sync pgvector call in thread
     all_embeddings = [f["embedding"] for f in detected_faces]
