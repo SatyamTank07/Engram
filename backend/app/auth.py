@@ -75,7 +75,7 @@ def decode_access_token(token: str) -> dict:
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
+            detail={"code": "INVALID_TOKEN", "message": "Could not validate credentials"},
         )
 
 
@@ -89,7 +89,7 @@ def decode_access_token_no_expiry(token: str) -> dict:
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
+            detail={"code": "INVALID_TOKEN", "message": "Could not validate credentials"},
         )
 
 
@@ -114,18 +114,30 @@ def verify_refresh_token(db: Session, raw_token: str, user_id: str) -> database.
     """Decrypt the stored refresh token and compare with the provided one."""
     user = db.query(database.User).filter(database.User.id == user_id).first()
     if not user or not user.refresh_token_encrypted:
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "INVALID_REFRESH_TOKEN", "message": "Invalid refresh token"},
+        )
 
     if user.refresh_token_expires_at and user.refresh_token_expires_at < datetime.utcnow():
-        raise HTTPException(status_code=401, detail="Refresh token expired")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "REFRESH_TOKEN_EXPIRED", "message": "Refresh token has expired"},
+        )
 
     try:
         stored_token = _fernet.decrypt(user.refresh_token_encrypted.encode()).decode()
     except InvalidToken:
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "INVALID_REFRESH_TOKEN", "message": "Invalid refresh token"},
+        )
 
     if not secrets.compare_digest(stored_token, raw_token):
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "INVALID_REFRESH_TOKEN", "message": "Invalid refresh token"},
+        )
 
     return user
 
@@ -160,14 +172,14 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str) 
         secure=COOKIE_SECURE,
         samesite=COOKIE_SAMESITE,
         max_age=REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-        path="/api/auth",          # only sent to auth endpoints
+        path="/api/v1/auth",          # only sent to auth endpoints
         domain=COOKIE_DOMAIN,
     )
 
 
 def clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(key=ACCESS_COOKIE, path="/", domain=COOKIE_DOMAIN)
-    response.delete_cookie(key=REFRESH_COOKIE, path="/api/auth", domain=COOKIE_DOMAIN)
+    response.delete_cookie(key=REFRESH_COOKIE, path="/api/v1/auth", domain=COOKIE_DOMAIN)
 
 
 # ---------------------------------------------------------------------------
@@ -186,16 +198,22 @@ def get_current_user(
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
+            detail={"code": "NOT_AUTHENTICATED", "message": "Authentication required"},
         )
 
     payload = decode_access_token(token)
     user_id: str = payload.get("sub")
     if user_id is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "INVALID_TOKEN", "message": "Access token is invalid"},
+        )
 
     user = db.query(database.User).filter(database.User.id == user_id).first()
     if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "USER_NOT_FOUND", "message": "User associated with this token no longer exists"},
+        )
 
     return user

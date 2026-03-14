@@ -384,3 +384,77 @@ async def get_agent_response(
         if "API key" in error_msg.lower():
             raise ValueError("Invalid or missing API key")
         raise Exception(f"Error getting response: {error_msg}")
+
+
+async def stream_agent_response(
+    user_message: str,
+    chat_history: list[dict] = None,
+    image_url: str | None = None,
+    user_id: str | None = None,
+):
+    """
+    Async generator that yields text chunks from the AI agent.
+
+    Tool-call iterations are executed internally (not streamed).
+    Only the final text response is streamed token-by-token via ``astream``.
+    """
+    if chat_history is None:
+        chat_history = []
+
+    if image_url:
+        user_message = f"[ATTACHED_IMAGE]\nImage URL: {image_url}\n[/ATTACHED_IMAGE]\n\n{user_message}"
+
+    llm = get_llm()
+
+    tools = []
+    if MCP_TOOLS_AVAILABLE and user_id:
+        tools = _make_tools(user_id)
+
+    llm_with_tools = llm.bind_tools(tools) if tools else llm
+
+    messages = format_chat_history(chat_history)
+    messages.append(HumanMessage(content=user_message))
+
+    # --- resolve tool calls (non-streaming) until the LLM is ready to reply ---
+    response = await llm_with_tools.ainvoke(messages)
+    iterations = 0
+
+    while response.tool_calls and iterations < MAX_TOOL_ITERATIONS:
+        iterations += 1
+        messages.append(response)
+
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            selected_tool = next((t for t in tools if t.name == tool_name), None)
+
+            if selected_tool:
+                try:
+                    tool_result = await selected_tool.ainvoke(tool_args)
+                    content = json.dumps(tool_result)
+                except Exception as e:
+                    content = f"Error executing tool {tool_name}: {str(e)}"
+            else:
+                content = f"Error: Tool {tool_name} not found"
+
+            messages.append(ToolMessage(content=content, tool_call_id=tool_call["id"]))
+
+        response = await llm_with_tools.ainvoke(messages)
+
+    if iterations >= MAX_TOOL_ITERATIONS and response.tool_calls:
+        messages.append(response)
+        for tool_call in response.tool_calls:
+            messages.append(
+                ToolMessage(
+                    content="Error: Maximum tool iteration limit reached. "
+                    "Please summarize what you have so far and respond to the user.",
+                    tool_call_id=tool_call["id"],
+                )
+            )
+        # Fall through to streaming the final response below
+
+    # --- stream the final text response token-by-token ---
+    # Re-invoke with astream so each chunk is yielded as it arrives
+    async for chunk in llm_with_tools.astream(messages):
+        if chunk.content:
+            yield chunk.content

@@ -4,6 +4,7 @@ FastAPI main application with chat endpoints.
 
 import asyncio
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 from io import BytesIO
@@ -14,15 +15,29 @@ import aiofiles.os
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, status, UploadFile, File
 from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sse_starlette.sse import EventSourceResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from . import crud, schemas, database, agent, auth, graph_db, vector_db, face_service, sync_worker
+
+
+# ---------------------------------------------------------------------------
+# Standardized error helpers
+# ---------------------------------------------------------------------------
+def error_response(status_code: int, code: str, message: str) -> JSONResponse:
+    """Return a JSONResponse with the standardized error envelope."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"code": code, "message": message}},
+    )
 
 # File upload constraints
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
@@ -85,7 +100,46 @@ app = FastAPI(
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# ---------------------------------------------------------------------------
+# Global exception handlers — standardize ALL error responses
+# ---------------------------------------------------------------------------
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return error_response(429, "RATE_LIMIT_EXCEEDED", f"Rate limit exceeded: {exc.detail}")
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    # If the endpoint already set a structured code via exc.detail as a dict, use it
+    if isinstance(exc.detail, dict) and "code" in exc.detail:
+        return error_response(exc.status_code, exc.detail["code"], exc.detail["message"])
+    # Otherwise, infer a code from the status code + detail string
+    code = _status_to_code(exc.status_code, str(exc.detail))
+    return error_response(exc.status_code, code, str(exc.detail))
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    messages = "; ".join(
+        f"{'.'.join(str(l) for l in e['loc'][1:])}: {e['msg']}" for e in exc.errors()
+    )
+    return error_response(422, "VALIDATION_ERROR", messages)
+
+
+def _status_to_code(status_code: int, detail: str) -> str:
+    """Map HTTP status + detail text to a machine-readable error code."""
+    mapping = {
+        400: "BAD_REQUEST",
+        401: "UNAUTHORIZED",
+        403: "ACCESS_DENIED",
+        404: "NOT_FOUND",
+        413: "PAYLOAD_TOO_LARGE",
+        429: "RATE_LIMIT_EXCEEDED",
+        500: "INTERNAL_ERROR",
+    }
+    return mapping.get(status_code, f"ERROR_{status_code}")
 
 # Serve uploaded images
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
@@ -98,6 +152,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Structured request/response logging middleware
+# ---------------------------------------------------------------------------
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    duration_ms = (time.time() - start) * 1000
+    logger.info(
+        "method=%s path=%s status=%d duration_ms=%.1f client=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        request.client.host if request.client else "-",
+    )
+    return response
 
 
 @app.get("/")
@@ -114,7 +187,7 @@ def readiness_check():
     return {"status": "ready"}
 
 
-@app.get("/admin/pending-syncs")
+@app.get("/api/v1/admin/pending-syncs")
 async def pending_sync_stats(
     current_user: database.User = Depends(auth.get_current_user),
 ):
@@ -125,7 +198,7 @@ async def pending_sync_stats(
 
 # Authentication endpoints
 
-@app.post("/api/auth/register", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED)
+@app.post("/api/v1/auth/register", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit("5/minute")
 def register(
     request: Request,
@@ -138,20 +211,20 @@ def register(
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Phone number already registered"
+            detail={"code": "PHONE_ALREADY_REGISTERED", "message": "Phone number already registered"},
         )
-    
+
     try:
         user = crud.create_user(db, user_data.phone, user_data.password)
         return user
     except IntegrityError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User creation failed"
+            detail={"code": "USER_CREATION_FAILED", "message": "User creation failed"},
         )
 
 
-@app.post("/api/auth/login", response_model=schemas.LoginResponse)
+@app.post("/api/v1/auth/login", response_model=schemas.LoginResponse)
 @limiter.limit("5/minute")
 def login(
     request: Request,
@@ -164,7 +237,7 @@ def login(
     if not user or not auth.verify_password(login_data.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
+            detail={"code": "INVALID_CREDENTIALS", "message": "Invalid phone number or password"},
         )
 
     access_token = auth.create_access_token(data={"sub": str(user.id)})
@@ -177,7 +250,7 @@ def login(
     )
 
 
-@app.get("/api/auth/me", response_model=schemas.UserResponse)
+@app.get("/api/v1/auth/me", response_model=schemas.UserResponse)
 def get_current_user_info(
     current_user: database.User = Depends(auth.get_current_user)
 ):
@@ -185,7 +258,7 @@ def get_current_user_info(
     return current_user
 
 
-@app.post("/api/auth/refresh", response_model=schemas.RefreshResponse)
+@app.post("/api/v1/auth/refresh", response_model=schemas.RefreshResponse)
 def refresh_token(
     request: Request,
     response: Response,
@@ -195,13 +268,19 @@ def refresh_token(
     old_refresh = request.cookies.get(auth.REFRESH_COOKIE)
     old_access = request.cookies.get(auth.ACCESS_COOKIE)
     if not old_refresh or not old_access:
-        raise HTTPException(status_code=401, detail="Missing auth cookies")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "MISSING_AUTH_COOKIES", "message": "Missing authentication cookies"},
+        )
 
     # Decode expired access token to get user_id (signature still verified)
     payload = auth.decode_access_token_no_expiry(old_access)
     user_id = payload.get("sub")
     if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "INVALID_TOKEN", "message": "Access token is invalid"},
+        )
 
     # Verify + rotate refresh token
     auth.verify_refresh_token(db, old_refresh, user_id)
@@ -212,7 +291,7 @@ def refresh_token(
     return schemas.RefreshResponse(expires_in=auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
 
 
-@app.post("/api/auth/logout")
+@app.post("/api/v1/auth/logout")
 def logout(
     request: Request,
     response: Response,
@@ -236,7 +315,7 @@ def logout(
 
 
 
-@app.post("/api/sessions", response_model=schemas.SessionResponse)
+@app.post("/api/v1/sessions", response_model=schemas.SessionResponse)
 def create_session(
     session_data: schemas.SessionCreate,
     current_user: database.User = Depends(auth.get_current_user),
@@ -248,7 +327,7 @@ def create_session(
 
 
 
-@app.get("/api/sessions", response_model=list[schemas.SessionResponse])
+@app.get("/api/v1/sessions", response_model=list[schemas.SessionResponse])
 def get_sessions(
     current_user: database.User = Depends(auth.get_current_user),
     db: Session = Depends(database.get_db)
@@ -258,7 +337,7 @@ def get_sessions(
 
 
 
-@app.get("/api/sessions/{session_id}/messages", response_model=list[schemas.MessageResponse])
+@app.get("/api/v1/sessions/{session_id}/messages", response_model=list[schemas.MessageResponse])
 def get_session_messages(
     session_id: str,
     current_user: database.User = Depends(auth.get_current_user),
@@ -268,16 +347,16 @@ def get_session_messages(
     # Verify session exists and belongs to user
     session = crud.get_session(db, session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND", "message": "Session not found"})
     
     if session.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "You do not have permission to access this resource"})
     
     return crud.get_session_messages(db, session_id)
 
 
 
-@app.delete("/api/sessions/{session_id}")
+@app.delete("/api/v1/sessions/{session_id}")
 def delete_session(
     session_id: str,
     current_user: database.User = Depends(auth.get_current_user),
@@ -287,17 +366,17 @@ def delete_session(
     # Verify session exists and belongs to user
     session = crud.get_session(db, session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND", "message": "Session not found"})
     
     if session.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "You do not have permission to access this resource"})
     
     crud.delete_session(db, session_id)
     return {"status": "deleted", "session_id": session_id}
 
 
 
-@app.post("/api/chat", response_model=schemas.ChatResponse)
+@app.post("/api/v1/chat", response_model=schemas.ChatResponse)
 @limiter.limit("20/minute")
 async def chat(
     request: Request,
@@ -311,10 +390,10 @@ async def chat(
     # Verify session exists and belongs to user
     session = crud.get_session(db, chat_request.session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND", "message": "Session not found"})
 
     if session.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "You do not have permission to access this resource"})
 
     # Get chat history
     messages = crud.get_session_messages(db, chat_request.session_id)
@@ -362,11 +441,97 @@ async def chat(
 
     except Exception as e:
         # If AI fails, still return user message but with error
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail={"code": "CHAT_AGENT_ERROR", "message": f"AI agent failed: {e}"})
+
+
+@app.post("/api/v1/chat/stream")
+@limiter.limit("20/minute")
+async def chat_stream(
+    request: Request,
+    chat_request: schemas.ChatRequest,
+    current_user: database.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db),
+):
+    """
+    Send a message and stream the AI response token-by-token via SSE.
+
+    Events:
+      - event: token   → {"token": "..."}
+      - event: done    → {"user_message": {...}, "assistant_message": {...}}
+      - event: error   → {"error": {"code": "...", "message": "..."}}
+    """
+    # Verify session ownership
+    session = crud.get_session(db, chat_request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND", "message": "Session not found"})
+    if session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "You do not have permission to access this resource"})
+
+    # Load history and save user message (same as non-streaming endpoint)
+    messages = crud.get_session_messages(db, chat_request.session_id)
+    chat_history = [{"role": msg.role, "content": msg.content} for msg in messages]
+
+    user_message = crud.save_message(
+        db, chat_request.session_id, "user", chat_request.message,
+        image_url=chat_request.image_url,
+    )
+
+    if len(messages) == 0:
+        title = chat_request.message[:50] + ("..." if len(chat_request.message) > 50 else "")
+        crud.update_session_title(db, chat_request.session_id, title)
+
+    # Serialize user message once for the final done event
+    user_msg_dict = schemas.MessageResponse.model_validate(user_message).model_dump(mode="json")
+
+    # Extract values needed by the generator BEFORE the request-scoped db
+    # session closes.  The generator runs after the handler returns, so the
+    # injected `db` and ORM objects (current_user) are already detached.
+    _user_id = str(current_user.id)
+    _session_id = chat_request.session_id
+    _message = chat_request.message
+    _image_url = chat_request.image_url
+
+    async def event_generator():
+        import json as _json
+
+        full_response = []
+        try:
+            async for token in agent.stream_agent_response(
+                _message, chat_history, _image_url,
+                user_id=_user_id,
+            ):
+                full_response.append(token)
+                yield {"event": "token", "data": _json.dumps({"token": token})}
+
+            # Save the complete response using a fresh db session
+            complete_text = "".join(full_response)
+            gen_db = database.SessionLocal()
+            try:
+                assistant_message = crud.save_message(
+                    gen_db, _session_id, "assistant", complete_text,
+                )
+                asst_msg_dict = schemas.MessageResponse.model_validate(assistant_message).model_dump(mode="json")
+            finally:
+                gen_db.close()
+
+            yield {
+                "event": "done",
+                "data": _json.dumps({"user_message": user_msg_dict, "assistant_message": asst_msg_dict}),
+            }
+
+        except Exception as e:
+            logger.exception("Streaming chat error for session %s: %s", _session_id, e)
+            yield {
+                "event": "error",
+                "data": _json.dumps({"error": {"code": "CHAT_AGENT_ERROR", "message": str(e)}}),
+            }
+
+    return EventSourceResponse(event_generator())
+
 
 # Image upload endpoint
 
-@app.post("/api/upload")
+@app.post("/api/v1/upload")
 async def upload_image(
     file: UploadFile = File(...),
     current_user: database.User = Depends(auth.get_current_user),
@@ -375,7 +540,7 @@ async def upload_image(
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type: {file.content_type}. Allowed types are: {', '.join(ALLOWED_IMAGE_TYPES)}"
+            detail={"code": "UNSUPPORTED_FILE_TYPE", "message": f"Unsupported file type: {file.content_type}. Allowed: {', '.join(ALLOWED_IMAGE_TYPES)}"},
         )
     
     ext = Path(file.filename or "image.jpg").suffix or ".jpg"
@@ -390,7 +555,7 @@ async def upload_image(
                 await aiofiles.os.remove(filepath)
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024)}MB"
+                    detail={"code": "FILE_TOO_LARGE", "message": f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024):.0f}MB"},
                 )
             await f.write(chunk)
 
@@ -399,7 +564,7 @@ async def upload_image(
 
 # PersonIdentity endpoints (powered by Neo4j Knowledge Graph)
 
-@app.post("/api/persons", status_code=status.HTTP_201_CREATED)
+@app.post("/api/v1/persons", status_code=status.HTTP_201_CREATED)
 async def create_person(
     person_data: schemas.PersonIdentityCreate,
     current_user: database.User = Depends(auth.get_current_user),
@@ -416,7 +581,7 @@ async def create_person(
     return person
 
 
-@app.get("/api/persons")
+@app.get("/api/v1/persons")
 async def get_persons(
     current_user: database.User = Depends(auth.get_current_user),
 ):
@@ -424,7 +589,7 @@ async def get_persons(
     return await graph_db.list_person_nodes(str(current_user.id))
 
 
-@app.get("/api/persons/{person_id}")
+@app.get("/api/v1/persons/{person_id}")
 async def get_person(
     person_id: str,
     current_user: database.User = Depends(auth.get_current_user),
@@ -432,15 +597,15 @@ async def get_person(
     """Get a specific person identity from the knowledge graph."""
     person = await graph_db.get_person_node(person_id)
     if not person:
-        raise HTTPException(status_code=404, detail="Person not found")
+        raise HTTPException(status_code=404, detail={"code": "PERSON_NOT_FOUND", "message": "Person not found"})
 
     if person.get("user_id") != str(current_user.id):
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "You do not have permission to access this resource"})
 
     return person
 
 
-@app.put("/api/persons/{person_id}")
+@app.put("/api/v1/persons/{person_id}")
 async def update_person(
     person_id: str,
     person_data: schemas.PersonIdentityUpdate,
@@ -449,10 +614,10 @@ async def update_person(
     """Update a person identity in the knowledge graph."""
     person = await graph_db.get_person_node(person_id)
     if not person:
-        raise HTTPException(status_code=404, detail="Person not found")
+        raise HTTPException(status_code=404, detail={"code": "PERSON_NOT_FOUND", "message": "Person not found"})
 
     if person.get("user_id") != str(current_user.id):
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "You do not have permission to access this resource"})
 
     updated_person = await graph_db.update_person_node(
         person_id,
@@ -465,7 +630,7 @@ async def update_person(
     return updated_person
 
 
-@app.delete("/api/persons/{person_id}")
+@app.delete("/api/v1/persons/{person_id}")
 async def delete_person(
     person_id: str,
     current_user: database.User = Depends(auth.get_current_user),
@@ -473,16 +638,16 @@ async def delete_person(
     """Delete a person identity from the knowledge graph."""
     person = await graph_db.get_person_node(person_id)
     if not person:
-        raise HTTPException(status_code=404, detail="Person not found")
+        raise HTTPException(status_code=404, detail={"code": "PERSON_NOT_FOUND", "message": "Person not found"})
 
     if person.get("user_id") != str(current_user.id):
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "You do not have permission to access this resource"})
 
     await graph_db.delete_person_node(person_id)
     return {"status": "deleted", "person_id": person_id}
 
 
-@app.post("/api/persons/search")
+@app.post("/api/v1/persons/search")
 async def semantic_search_persons(
     search_req: schemas.SemanticSearchRequest,
     current_user: database.User = Depends(auth.get_current_user),
@@ -519,7 +684,7 @@ async def semantic_search_persons(
     return results
 
 
-@app.post("/api/persons/identify")
+@app.post("/api/v1/persons/identify")
 @limiter.limit("10/minute")
 async def identify_person_from_face(
     request: Request,
@@ -534,7 +699,7 @@ async def identify_person_from_face(
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type: {file.content_type}. Allowed types are: {', '.join(ALLOWED_IMAGE_TYPES)}"
+            detail={"code": "UNSUPPORTED_FILE_TYPE", "message": f"Unsupported file type: {file.content_type}. Allowed: {', '.join(ALLOWED_IMAGE_TYPES)}"},
         )
         
     buffer = BytesIO()
@@ -544,14 +709,14 @@ async def identify_person_from_face(
         if size > MAX_UPLOAD_SIZE:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024)}MB"
+                detail={"code": "FILE_TOO_LARGE", "message": f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024):.0f}MB"},
             )
         buffer.write(chunk)
 
     return await face_service.identify_faces_in_image(buffer.getvalue(), str(current_user.id))
 
 
-@app.post("/api/persons/{person_id}/face")
+@app.post("/api/v1/persons/{person_id}/face")
 @limiter.limit("10/minute")
 async def upload_person_face(
     request: Request,
@@ -564,12 +729,12 @@ async def upload_person_face(
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type: {file.content_type}. Allowed types are: {', '.join(ALLOWED_IMAGE_TYPES)}"
+            detail={"code": "UNSUPPORTED_FILE_TYPE", "message": f"Unsupported file type: {file.content_type}. Allowed: {', '.join(ALLOWED_IMAGE_TYPES)}"},
         )
 
     person = await graph_db.get_person_node(person_id)
     if not person or person.get("user_id") != str(current_user.id):
-        raise HTTPException(status_code=404, detail="Person not found")
+        raise HTTPException(status_code=404, detail={"code": "PERSON_NOT_FOUND", "message": "Person not found"})
 
     ext = Path(file.filename or "face.jpg").suffix or ".jpg"
     filename = f"{person_id}{ext}"
@@ -585,7 +750,7 @@ async def upload_person_face(
                 await aiofiles.os.remove(filepath)
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024)}MB"
+                    detail={"code": "FILE_TOO_LARGE", "message": f"File size exceeds maximum limit of {MAX_UPLOAD_SIZE / (1024*1024):.0f}MB"},
                 )
             buffer.write(chunk)
             await f.write(chunk)
