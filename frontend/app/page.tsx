@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import SessionSidebar from '@/components/SessionSidebar';
 import ChatInterface from '@/components/ChatInterface';
+import ErrorBoundary from '@/components/ErrorBoundary';
 import { isAuthenticated, logout } from '@/lib/auth';
 
 export default function Home() {
@@ -39,13 +40,17 @@ export default function Home() {
 
   return (
     <div className="flex h-screen">
-      <SessionSidebar
-        currentSessionId={currentSessionId}
-        onSessionSelect={setCurrentSessionId}
-        onNewChat={handleNewChat}
-        onLogout={handleLogout}
-      />
-      <ChatInterface sessionId={currentSessionId} />
+      <ErrorBoundary fallback={<div className="w-72 bg-gray-50 p-4 text-sm text-gray-500">Sidebar failed to load. Please refresh.</div>}>
+        <SessionSidebar
+          currentSessionId={currentSessionId}
+          onSessionSelect={setCurrentSessionId}
+          onNewChat={handleNewChat}
+          onLogout={handleLogout}
+        />
+      </ErrorBoundary>
+      <ErrorBoundary>
+        <ChatInterface sessionId={currentSessionId} />
+      </ErrorBoundary>
     </div>
   );
 }

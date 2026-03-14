@@ -145,3 +145,17 @@ class FaceIdentifyResult(BaseModel):
     name: str
     short_bio: str | None = None
     confidence_score: float  # 0.0 to 1.0, higher = better match
+
+
+# ---------------------------------------------------------------------------
+# Standardized error response
+# ---------------------------------------------------------------------------
+class ErrorDetail(BaseModel):
+    """Inner error object."""
+    code: str
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    """Standardized error envelope returned by all endpoints."""
+    error: ErrorDetail

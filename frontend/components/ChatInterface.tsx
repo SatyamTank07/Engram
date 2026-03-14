@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Message, getSessionMessages, sendMessage, validateImageFile } from '@/lib/api';
+import { Message, getSessionMessages, sendMessage, sendMessageStream, validateImageFile } from '@/lib/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -18,6 +18,19 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
     const [imageError, setImageError] = useState('');
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
+    // Tracks whether a send is in-flight so loadMessages won't overwrite optimistic updates
+    const isSendingRef = useRef(false);
+
+    // Stable preview URL — created once per file, revoked on change/unmount
+    const previewUrl = useMemo(() => {
+        return attachedImage ? URL.createObjectURL(attachedImage) : null;
+    }, [attachedImage]);
+
+    useEffect(() => {
+        return () => {
+            if (previewUrl) URL.revokeObjectURL(previewUrl);
+        };
+    }, [previewUrl]);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -40,7 +53,10 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
 
         try {
             const data = await getSessionMessages(sessionId);
-            setMessages(data);
+            // Don't overwrite optimistic messages while a send is in-flight
+            if (!isSendingRef.current) {
+                setMessages(data);
+            }
         } catch (error) {
             console.error('Failed to load messages:', error);
         }
@@ -71,6 +87,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
         setAttachedImage(null);
         setImageError('');
         setLoading(true);
+        isSendingRef.current = true;
 
         // Optimistic: show user message immediately
         const tempUserMessage: Message = {
@@ -81,29 +98,72 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
             image_url: localImageUrl,
             timestamp: new Date().toISOString(),
         };
-        setMessages(prev => [...prev, tempUserMessage]);
+
+        // Placeholder for the streaming assistant response
+        const streamingMsgId = Date.now() + 1;
+        const streamingMessage: Message = {
+            id: streamingMsgId,
+            session_id: sessionId,
+            role: 'assistant',
+            content: '',
+            image_url: null,
+            timestamp: new Date().toISOString(),
+        };
+
+        setMessages(prev => [...prev, tempUserMessage, streamingMessage]);
 
         try {
-            const response = await sendMessage(sessionId, userMessage, imageFile || undefined);
-            // Replace temp message with real one + add assistant response
-            setMessages(prev => [
-                ...prev.filter(m => m.id !== tempUserMessage.id),
-                response.user_message,
-                response.assistant_message,
-            ]);
+            await sendMessageStream(
+                sessionId,
+                userMessage,
+                imageFile || undefined,
+                // onToken — append each chunk to the streaming message
+                (token: string) => {
+                    setMessages(prev =>
+                        prev.map(m =>
+                            m.id === streamingMsgId
+                                ? { ...m, content: m.content + token }
+                                : m
+                        )
+                    );
+                },
+                // onDone — replace temp messages with persisted ones
+                (data) => {
+                    setMessages(prev => [
+                        ...prev.filter(m => m.id !== tempUserMessage.id && m.id !== streamingMsgId),
+                        data.user_message,
+                        data.assistant_message,
+                    ]);
+                    isSendingRef.current = false;
+                    setLoading(false);
+                    if (localImageUrl) URL.revokeObjectURL(localImageUrl);
+                },
+                // onError
+                (err) => {
+                    console.error('Stream error:', err);
+                    setMessages(prev =>
+                        prev.map(m =>
+                            m.id === streamingMsgId
+                                ? { ...m, content: m.content || 'Sorry, something went wrong. Please try again.' }
+                                : m
+                        )
+                    );
+                    isSendingRef.current = false;
+                    setLoading(false);
+                    if (localImageUrl) URL.revokeObjectURL(localImageUrl);
+                },
+            );
         } catch (error) {
+            // sendMessageStream can throw during image upload (before stream starts)
             console.error('Failed to send message:', error);
-            // Keep the user message visible but mark as failed
-            const errorMsg: Message = {
-                id: Date.now() + 1,
-                session_id: sessionId,
-                role: 'assistant',
-                content: 'Sorry, something went wrong. Please try again.',
-                image_url: null,
-                timestamp: new Date().toISOString(),
-            };
-            setMessages(prev => [...prev, errorMsg]);
-        } finally {
+            setMessages(prev =>
+                prev.map(m =>
+                    m.id === streamingMsgId
+                        ? { ...m, content: 'Sorry, something went wrong. Please try again.' }
+                        : m
+                )
+            );
+            isSendingRef.current = false;
             setLoading(false);
             if (localImageUrl) URL.revokeObjectURL(localImageUrl);
         }
@@ -144,7 +204,8 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                             )}
                             {message.role === 'assistant' ? (
                                 <div className="prose prose-sm max-w-none">
-                                    <ReactMarkdown
+                                    {/* Do NOT add rehypeRaw — raw HTML must stay stripped to prevent XSS */}
+                                <ReactMarkdown
                                         components={{
                                             p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
                                             ul: ({ children }) => <ul className="list-disc ml-4 mb-2 space-y-1">{children}</ul>,
@@ -204,7 +265,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                 {attachedImage && (
                     <div className="flex items-center gap-3 mb-2 px-1">
                         <img
-                            src={URL.createObjectURL(attachedImage)}
+                            src={previewUrl!}
                             alt="Preview"
                             className="h-16 w-16 object-cover rounded-md border border-gray-200"
                         />

@@ -2,12 +2,15 @@
 LangChain agent logic for chat completions.
 """
 
+import logging
 import os
 import sys
 import json
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
@@ -35,7 +38,7 @@ try:
     MCP_TOOLS_AVAILABLE = True
 except ImportError:
     MCP_TOOLS_AVAILABLE = False
-    print("Warning: Could not import MCP tools. Chatbot will run without personal identity features.")
+    logger.warning("Could not import MCP tools. Chatbot will run without personal identity features.")
 
 # Load environment variables
 load_dotenv()
@@ -319,6 +322,7 @@ async def get_agent_response(
 
     try:
         llm = get_llm()
+        logger.debug("Agent invoked: user_id=%s, history_len=%d, has_image=%s", user_id, len(chat_history), bool(image_url))
 
         # Build tools scoped to this user
         tools = []
@@ -346,6 +350,7 @@ async def get_agent_response(
             for tool_call in response.tool_calls:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["args"]
+                logger.debug("Tool call: name=%s", tool_name)
 
                 selected_tool = next((t for t in tools if t.name == tool_name), None)
 
@@ -354,8 +359,10 @@ async def get_agent_response(
                         tool_result = await selected_tool.ainvoke(tool_args)
                         content = json.dumps(tool_result)
                     except Exception as e:
+                        logger.error("Tool execution failed: tool=%s error=%s", tool_name, e)
                         content = f"Error executing tool {tool_name}: {str(e)}"
                 else:
+                    logger.warning("Tool not found: %s", tool_name)
                     content = f"Error: Tool {tool_name} not found"
 
                 messages.append(ToolMessage(content=content, tool_call_id=tool_call["id"]))
@@ -365,6 +372,7 @@ async def get_agent_response(
         # If we exhausted iterations but the LLM still wants to call tools,
         # force a final response explaining the limit was reached.
         if iterations >= MAX_TOOL_ITERATIONS and response.tool_calls:
+            logger.warning("Agent reached max tool iterations (%d)", MAX_TOOL_ITERATIONS)
             messages.append(response)
             # Add a synthetic tool error for each pending call
             for tool_call in response.tool_calls:
@@ -381,6 +389,94 @@ async def get_agent_response(
 
     except Exception as e:
         error_msg = str(e)
+        logger.error("Agent response failed: %s", error_msg, exc_info=True)
+        if "API key" in error_msg.lower():
+            raise ValueError("Invalid or missing API key")
+        raise Exception(f"Error getting response: {error_msg}")
+
+
+async def stream_agent_response(
+    user_message: str,
+    chat_history: list[dict] = None,
+    image_url: str | None = None,
+    user_id: str | None = None,
+):
+    """
+    Async generator that yields text chunks from the AI agent.
+
+    Tool-call iterations are executed internally (not streamed).
+    Only the final text response is streamed token-by-token via ``astream``.
+    """
+    if chat_history is None:
+        chat_history = []
+
+    if image_url:
+        user_message = f"[ATTACHED_IMAGE]\nImage URL: {image_url}\n[/ATTACHED_IMAGE]\n\n{user_message}"
+
+    try:
+        llm = get_llm()
+        logger.debug("Streaming agent invoked: user_id=%s", user_id)
+
+        tools = []
+        if MCP_TOOLS_AVAILABLE and user_id:
+            tools = _make_tools(user_id)
+
+        llm_with_tools = llm.bind_tools(tools) if tools else llm
+
+        messages = format_chat_history(chat_history)
+        messages.append(HumanMessage(content=user_message))
+
+        # --- resolve tool calls (non-streaming) until the LLM is ready to reply ---
+        response = await llm_with_tools.ainvoke(messages)
+        iterations = 0
+
+        while response.tool_calls and iterations < MAX_TOOL_ITERATIONS:
+            iterations += 1
+            messages.append(response)
+
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                logger.debug("Tool call (streaming): name=%s", tool_name)
+                selected_tool = next((t for t in tools if t.name == tool_name), None)
+
+                if selected_tool:
+                    try:
+                        tool_result = await selected_tool.ainvoke(tool_args)
+                        content = json.dumps(tool_result)
+                    except Exception as e:
+                        logger.error("Tool execution failed during streaming: tool=%s error=%s", tool_name, e)
+                        content = f"Error executing tool {tool_name}: {str(e)}"
+                else:
+                    logger.warning("Tool not found (streaming): %s", tool_name)
+                    content = f"Error: Tool {tool_name} not found"
+
+                messages.append(ToolMessage(content=content, tool_call_id=tool_call["id"]))
+
+            response = await llm_with_tools.ainvoke(messages)
+
+        if iterations >= MAX_TOOL_ITERATIONS and response.tool_calls:
+            logger.warning("Streaming agent reached max tool iterations (%d)", MAX_TOOL_ITERATIONS)
+            messages.append(response)
+            for tool_call in response.tool_calls:
+                messages.append(
+                    ToolMessage(
+                        content="Error: Maximum tool iteration limit reached. "
+                        "Please summarize what you have so far and respond to the user.",
+                        tool_call_id=tool_call["id"],
+                    )
+                )
+            # Fall through to streaming the final response below
+
+        # --- stream the final text response token-by-token ---
+        # Re-invoke with astream so each chunk is yielded as it arrives
+        async for chunk in llm_with_tools.astream(messages):
+            if chunk.content:
+                yield chunk.content
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error("Streaming agent response failed: %s", error_msg, exc_info=True)
         if "API key" in error_msg.lower():
             raise ValueError("Invalid or missing API key")
         raise Exception(f"Error getting response: {error_msg}")
