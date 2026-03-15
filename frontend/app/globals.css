@@ -1,8 +1,82 @@
 @import "tailwindcss";
 
+/* ── Light theme (default) ── */
+[data-theme="light"],
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  --surface: #ffffff;
+  --surface-secondary: #f9fafb;
+  --muted: #6b7280;
+  --muted-foreground: #9ca3af;
+  --border: #e5e7eb;
+  --border-light: #f3f4f6;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-light: #eff6ff;
+  --accent-border: #bfdbfe;
+  --destructive: #ef4444;
+  --destructive-hover: #dc2626;
+  --destructive-light: #fef2f2;
+  --destructive-border: #fecaca;
+  --success: #22c55e;
+  --success-light: #f0fdf4;
+  --warning: #f59e0b;
+  --warning-light: #fffbeb;
+  --input-bg: #ffffff;
+  --input-border: #d1d5db;
+  --code-bg: #f3f4f6;
+  --code-block-bg: #1e1e2e;
+  --code-block-text: #cdd6f4;
+  --chat-user-bg: #3b82f6;
+  --chat-user-text: #ffffff;
+  --chat-assistant-bg: #f3f4f6;
+  --chat-assistant-text: #171717;
+  --chat-assistant-border: #e5e7eb;
+  --sidebar-bg: #f9fafb;
+  --overlay-bg: rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+}
+
+/* ── Dark theme ── */
+[data-theme="dark"] {
+  --background: #0f0f14;
+  --foreground: #ededed;
+  --surface: #1a1a24;
+  --surface-secondary: #22222e;
+  --muted: #9ca3af;
+  --muted-foreground: #6b7280;
+  --border: #2e2e3a;
+  --border-light: #252530;
+  --accent: #60a5fa;
+  --accent-hover: #3b82f6;
+  --accent-light: #1e293b;
+  --accent-border: #1e3a5f;
+  --destructive: #f87171;
+  --destructive-hover: #ef4444;
+  --destructive-light: #2d1b1b;
+  --destructive-border: #5c2020;
+  --success: #4ade80;
+  --success-light: #1a2e1a;
+  --warning: #fbbf24;
+  --warning-light: #2e2a1a;
+  --input-bg: #22222e;
+  --input-border: #3e3e4a;
+  --code-bg: #2e2e3a;
+  --code-block-bg: #11111b;
+  --code-block-text: #cdd6f4;
+  --chat-user-bg: #2563eb;
+  --chat-user-text: #ffffff;
+  --chat-assistant-bg: #22222e;
+  --chat-assistant-text: #ededed;
+  --chat-assistant-border: #2e2e3a;
+  --sidebar-bg: #16161e;
+  --overlay-bg: rgba(0, 0, 0, 0.7);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
 }
 
 @theme inline {
@@ -12,15 +86,86 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* ── Animations ── */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideInUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes staggerDot1 {
+  0%, 80%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-6px); }
+}
+@keyframes staggerDot2 {
+  0%, 80%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-6px); }
+}
+@keyframes staggerDot3 {
+  0%, 80%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-6px); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out;
+}
+
+.animate-slideInUp {
+  animation: slideInUp 0.3s ease-out;
+}
+
+.animate-scaleIn {
+  animation: scaleIn 0.2s ease-out;
+}
+
+.animate-dot-1 {
+  animation: staggerDot1 1.4s infinite ease-in-out;
+  animation-delay: 0s;
+}
+.animate-dot-2 {
+  animation: staggerDot2 1.4s infinite ease-in-out;
+  animation-delay: 0.2s;
+}
+.animate-dot-3 {
+  animation: staggerDot3 1.4s infinite ease-in-out;
+  animation-delay: 0.4s;
+}
+
+/* ── Skeleton pulse ── */
+@keyframes skeleton {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-skeleton {
+  animation: skeleton 1.5s ease-in-out infinite;
+}
+
+/* ── Scrollbar styling ── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--muted-foreground);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
