@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
-import { ArrowLeft, Camera, Pencil, Trash2, User } from 'lucide-react';
+import { ArrowLeft, Camera, Pencil, Trash2, User, Share2 } from 'lucide-react';
 import { isAuthenticated } from '@/lib/auth';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Skeleton from '@/components/Skeleton';
@@ -200,6 +200,18 @@ export default function PersonDetailPage() {
           </h1>
         </div>
         <div className="flex items-center gap-2">
+          <Link
+            href={`/persons/${id}/connections`}
+            className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg transition-colors focus-visible:ring-2"
+            style={{
+              border: '1px solid var(--accent-border)',
+              color: 'var(--accent)',
+              background: 'var(--surface)',
+            }}
+            aria-label="View connections"
+          >
+            <Share2 size={14} /> Connections
+          </Link>
           {!editing && (
             <button
               onClick={() => setEditing(true)}
@@ -436,67 +448,36 @@ export default function PersonDetailPage() {
           </div>
         )}
 
-        {/* Face Upload - only in edit mode */}
-        {editing && (
+        {/* Face upload status messages - shown below when using camera overlay */}
+        {editing && (faceFile || faceStatus !== 'idle' || faceError) && (
           <div
-            className="rounded-xl p-5 sm:p-6"
+            className="rounded-xl p-4"
             style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
           >
-            <h3 className="text-sm font-semibold mb-1 flex items-center gap-2" style={{ color: 'var(--foreground)' }}>
-              <Camera size={16} /> Face Photo
-            </h3>
-            <p className="text-xs mb-4" style={{ color: 'var(--muted)' }}>
-              Upload a clear face photo. This enables face identification — you can later upload any photo to identify this person.
-            </p>
-
-            {person.face_image_url && (
-              <div className="mb-4">
-                <img
-                  src={`${API_BASE_URL}${person.face_image_url}`}
-                  alt={`${person.name}'s face`}
-                  className="w-32 h-32 rounded-xl object-cover"
-                  style={{ border: '1px solid var(--border)' }}
-                />
-              </div>
-            )}
-
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => faceInputRef.current?.click()}
-                className="text-sm px-3 py-2 rounded-lg transition-colors focus-visible:ring-2"
-                style={{
-                  border: '1px solid var(--border)',
-                  color: 'var(--muted)',
-                  background: 'var(--surface)',
-                }}
-                aria-label="Choose face photo"
-              >
-                {faceFile ? faceFile.name : 'Choose photo'}
-              </button>
-              {faceFile && (
+            {faceFile && (
+              <div className="flex items-center gap-3">
+                <span className="text-sm" style={{ color: 'var(--foreground)' }}>{faceFile.name}</span>
                 <button
                   onClick={handleFaceUpload}
                   disabled={faceStatus === 'uploading'}
-                  className="px-4 py-2 rounded-lg text-sm font-medium text-white disabled:opacity-50 transition-colors active:scale-95 focus-visible:ring-2"
+                  className="px-4 py-1.5 rounded-lg text-sm font-medium text-white disabled:opacity-50 transition-colors active:scale-95 focus-visible:ring-2"
                   style={{ background: 'var(--accent)' }}
                 >
                   {faceStatus === 'uploading' ? 'Uploading...' : 'Upload Face'}
                 </button>
-              )}
-            </div>
-
+              </div>
+            )}
             {faceStatus === 'success' && (
-              <p className="mt-3 text-sm" style={{ color: 'var(--success)' }}>Face photo stored successfully.</p>
+              <p className="text-sm" style={{ color: 'var(--success)' }}>Face photo stored successfully.</p>
             )}
             {faceStatus === 'error' && (
-              <p className="mt-3 text-sm" style={{ color: 'var(--destructive)' }} role="alert">
+              <p className="text-sm" style={{ color: 'var(--destructive)' }} role="alert">
                 {faceError || 'Upload failed. Please try again.'}
               </p>
             )}
             {faceStatus === 'idle' && faceError && (
-              <p className="mt-3 text-sm" style={{ color: 'var(--destructive)' }} role="alert">{faceError}</p>
+              <p className="text-sm" style={{ color: 'var(--destructive)' }} role="alert">{faceError}</p>
             )}
-            <p className="mt-2 text-xs" style={{ color: 'var(--muted-foreground)' }}>JPEG, PNG, or WebP (max 10MB)</p>
           </div>
         )}
 

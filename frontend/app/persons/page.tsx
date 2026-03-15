@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
-import { ArrowLeft, Users, Search, Upload, UserPlus } from 'lucide-react';
+import { ArrowLeft, Users, Search, Upload, UserPlus, Share2 } from 'lucide-react';
 import { isAuthenticated } from '@/lib/auth';
 import Skeleton from '@/components/Skeleton';
 import {
@@ -501,6 +501,18 @@ export default function PersonsPage() {
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0 sm:ml-4">
+                      <Link
+                        href={`/persons/${person.id}/connections`}
+                        className="text-xs px-3 py-1.5 rounded-lg transition-colors focus-visible:ring-2 flex items-center gap-1"
+                        style={{
+                          border: '1px solid var(--border)',
+                          color: 'var(--muted)',
+                          background: 'var(--surface)',
+                        }}
+                        title="View connections"
+                      >
+                        <Share2 size={12} /> Connections
+                      </Link>
                       <Link
                         href={`/persons/${person.id}`}
                         className="text-xs px-3 py-1.5 rounded-lg transition-colors focus-visible:ring-2"

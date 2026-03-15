@@ -102,6 +102,23 @@ async def delete_person(
     return {"status": "deleted", "person_id": person_id}
 
 
+@router.get("/{person_id}/connections")
+async def get_person_connections(
+    person_id: str,
+    current_user: database.User = Depends(auth.get_current_user),
+):
+    """Get all connections (relationships + connected persons) for a person, rendered as a graph."""
+    person = await graph_db.get_person_node(person_id)
+    if not person:
+        raise HTTPException(status_code=404, detail={"code": "PERSON_NOT_FOUND", "message": "Person not found"})
+
+    if person.get("user_id") != str(current_user.id):
+        raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "You do not have permission to access this resource"})
+
+    result = await graph_db.get_person_connections(person_id)
+    return result
+
+
 @router.post("/search")
 async def semantic_search_persons(
     search_req: schemas.SemanticSearchRequest,

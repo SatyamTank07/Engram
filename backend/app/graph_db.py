@@ -374,6 +374,65 @@ async def get_relationships(person_id: str) -> list[dict]:
         ]
 
 
+async def get_person_connections(person_id: str) -> dict:
+    """Get a person's full connection graph: the person node + all connected persons with relationship info.
+
+    Returns a dict with:
+      - person: the center person node (full details)
+      - connections: list of {person: dict, relationship: str, direction: str, properties: dict}
+    """
+    driver = _get_driver()
+    async with driver.session() as session:
+        # Single query: fetch the center person and all connected persons with relationship details
+        result = await session.run(
+            """
+            MATCH (p:Person {id: $id})
+            OPTIONAL MATCH (p)-[r]-(other:Person)
+            RETURN p,
+                   type(r) AS rel_type,
+                   properties(r) AS rel_props,
+                   other,
+                   startNode(r) = p AS is_outgoing
+            """,
+            id=person_id,
+        )
+        records = [record async for record in result]
+
+    if not records:
+        return {"person": None, "connections": []}
+
+    # The center person is the same in every row
+    center_person = _node_to_dict(records[0]["p"])
+
+    connections = []
+    seen_edges = set()
+    for record in records:
+        if record["other"] is None:
+            continue
+        other = _node_to_dict(record["other"])
+        # Deduplicate edges (same pair can appear twice if multiple relationships exist)
+        edge_key = (other["id"], record["rel_type"], record["is_outgoing"])
+        if edge_key in seen_edges:
+            continue
+        seen_edges.add(edge_key)
+
+        connections.append({
+            "person": {
+                "id": other.get("id"),
+                "name": other.get("name"),
+                "short_bio": other.get("short_bio"),
+                "face_image_url": other.get("face_image_url"),
+                "trust_score": other.get("trust_score"),
+                "aliases": other.get("aliases", []),
+            },
+            "relationship": record["rel_type"],
+            "direction": "outgoing" if record["is_outgoing"] else "incoming",
+            "properties": dict(record["rel_props"]) if record["rel_props"] else {},
+        })
+
+    return {"person": center_person, "connections": connections}
+
+
 # ---------------------
 # Helpers
 # ---------------------
