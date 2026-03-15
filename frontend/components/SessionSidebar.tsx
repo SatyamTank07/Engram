@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
 import {
@@ -13,8 +14,8 @@ import Skeleton from '@/components/Skeleton';
 import { Session, getSessions, createSession, deleteSession } from '@/lib/api';
 
 interface SessionSidebarProps {
-  currentSessionId: number | null;
-  onSessionSelect: (sessionId: number) => void;
+  currentSessionId: string | null;
+  onSessionSelect: (sessionId: string) => void;
   onNewChat: () => void;
   onLogout?: () => void;
 }
@@ -26,10 +27,11 @@ export default function SessionSidebar({
   onLogout,
 }: SessionSidebarProps) {
   const { theme, toggleTheme } = useTheme();
+  const router = useRouter();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
-  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   const loadSessions = async () => {
     try {
@@ -50,8 +52,7 @@ export default function SessionSidebar({
     try {
       const newSession = await createSession();
       setSessions([newSession, ...sessions]);
-      onNewChat();
-      onSessionSelect(newSession.id);
+      router.push(`/chat/${newSession.id}`);
       toast.success('New chat created');
     } catch {
       toast.error('Failed to create session');
@@ -64,9 +65,10 @@ export default function SessionSidebar({
     setDeleteTarget(null);
     try {
       await deleteSession(sessionId);
-      setSessions(sessions.filter(s => s.id !== sessionId));
+      const remaining = sessions.filter(s => s.id !== sessionId);
+      setSessions(remaining);
       if (currentSessionId === sessionId) {
-        onSessionSelect(sessions[0]?.id || 0);
+        router.push('/');
       }
       toast.success('Conversation deleted');
     } catch {

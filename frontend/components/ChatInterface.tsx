@@ -9,7 +9,7 @@ import { Message, getSessionMessages, sendMessageStream, validateImageFile } fro
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 interface ChatInterfaceProps {
-  sessionId: number | null;
+  sessionId: string | null;
 }
 
 function relativeTime(dateStr: string): string {
@@ -138,7 +138,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
     isSendingRef.current = true;
 
     const tempUserMessage: Message = {
-      id: Date.now(),
+      id: `temp-${Date.now()}`,
       session_id: sessionId,
       role: 'user',
       content: userMessage,
@@ -146,7 +146,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
       timestamp: new Date().toISOString(),
     };
 
-    const streamingMsgId = Date.now() + 1;
+    const streamingMsgId = `temp-${Date.now() + 1}`;
     const streamingMessage: Message = {
       id: streamingMsgId,
       session_id: sessionId,
