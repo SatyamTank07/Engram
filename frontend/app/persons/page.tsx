@@ -501,31 +501,6 @@ export default function PersonsPage() {
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0 sm:ml-4">
-                      <button
-                        onClick={() => faceInputRefs.current[person.id]?.click()}
-                        disabled={uploadStatus === 'uploading'}
-                        className="text-xs px-3 py-1.5 rounded-lg disabled:opacity-50 transition-colors focus-visible:ring-2"
-                        style={{
-                          border: '1px solid var(--border)',
-                          color: 'var(--muted)',
-                          background: 'var(--surface)',
-                        }}
-                        aria-label={`Upload face photo for ${person.name}`}
-                      >
-                        {uploadStatus === 'uploading' ? 'Uploading...'
-                          : uploadStatus === 'done' ? 'Face saved'
-                          : uploadStatus === 'error' ? 'Failed'
-                          : 'Upload Face'}
-                      </button>
-                      <input
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        className="hidden"
-                        ref={el => { faceInputRefs.current[person.id] = el; }}
-                        onChange={e => {
-                          if (e.target.files?.[0]) handleFaceUpload(person.id, e.target.files[0]);
-                        }}
-                      />
                       <Link
                         href={`/persons/${person.id}`}
                         className="text-xs px-3 py-1.5 rounded-lg transition-colors focus-visible:ring-2"
