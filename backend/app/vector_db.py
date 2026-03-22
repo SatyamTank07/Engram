@@ -149,6 +149,78 @@ def init_vector_db():
                 WHERE retry_count < max_retries;
             """)
 
+            # Add entity_type column to pending_embedding_syncs (backward compat)
+            cur.execute("""
+                ALTER TABLE pending_embedding_syncs
+                ADD COLUMN IF NOT EXISTS entity_type VARCHAR(20) DEFAULT 'person';
+            """)
+
+            # --- Idea embeddings table ---
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS idea_embeddings (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    idea_id VARCHAR(255) UNIQUE NOT NULL,
+                    user_id VARCHAR(255) NOT NULL,
+                    text_content TEXT,
+                    text_embedding vector({TEXT_EMBEDDING_DIM}),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_idea_text_embedding
+                ON idea_embeddings
+                USING hnsw (text_embedding vector_cosine_ops)
+                WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_idea_emb_user_id
+                ON idea_embeddings (user_id);
+            """)
+
+            # --- Content embeddings table ---
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS content_embeddings (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    content_id VARCHAR(255) UNIQUE NOT NULL,
+                    user_id VARCHAR(255) NOT NULL,
+                    text_content TEXT,
+                    text_embedding vector({TEXT_EMBEDDING_DIM}),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_content_text_embedding
+                ON content_embeddings
+                USING hnsw (text_embedding vector_cosine_ops)
+                WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_content_emb_user_id
+                ON content_embeddings (user_id);
+            """)
+
+            # --- Project embeddings table ---
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS project_embeddings (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    project_id VARCHAR(255) UNIQUE NOT NULL,
+                    user_id VARCHAR(255) NOT NULL,
+                    text_content TEXT,
+                    text_embedding vector({TEXT_EMBEDDING_DIM}),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_project_text_embedding
+                ON project_embeddings
+                USING hnsw (text_embedding vector_cosine_ops)
+                WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_project_emb_user_id
+                ON project_embeddings (user_id);
+            """)
+
         conn.commit()
     logger.info("pgvector schema ready")
 
@@ -395,20 +467,221 @@ def semantic_search(
 # ---------------------
 
 
-def insert_pending_sync(person_id: str, user_id: str, operation: str = "upsert"):
+def insert_pending_sync(person_id: str, user_id: str, operation: str = "upsert", entity_type: str = "person"):
     """Queue a failed embedding sync for later retry."""
     with _pooled_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO pending_embedding_syncs
-                    (id, person_id, user_id, operation)
-                VALUES (%s, %s, %s, %s)
+                    (id, person_id, user_id, operation, entity_type)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 """,
-                (str(uuid.uuid4()), person_id, user_id, operation),
+                (str(uuid.uuid4()), person_id, user_id, operation, entity_type),
             )
         conn.commit()
+
+
+# ---------------------
+# Idea Embedding Operations
+# ---------------------
+
+
+def upsert_idea_text_embedding(
+    idea_id: str, user_id: str, text_content: str, embedding: list[float],
+):
+    """Insert or update the text embedding for an idea."""
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO idea_embeddings (id, idea_id, user_id, text_content, text_embedding, updated_at)
+                    VALUES (%s, %s, %s, %s, %s::vector, %s)
+                    ON CONFLICT (idea_id) DO UPDATE SET
+                        text_content = EXCLUDED.text_content,
+                        text_embedding = EXCLUDED.text_embedding,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (str(uuid.uuid4()), idea_id, user_id, text_content, str(embedding), datetime.now(timezone.utc)),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to upsert idea text embedding for idea_id=%s: %s", idea_id, e)
+        raise
+
+
+def idea_semantic_search(user_id: str, query_embedding: list[float], limit: int = 5) -> list[dict]:
+    """Find ideas most similar to a query using cosine distance."""
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
+                cur.execute(
+                    """
+                    SELECT idea_id, text_content, 1 - (text_embedding <=> %s::vector) AS similarity_score
+                    FROM idea_embeddings
+                    WHERE user_id = %s AND text_embedding IS NOT NULL
+                    ORDER BY text_embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (str(query_embedding), user_id, str(query_embedding), limit),
+                )
+                return [
+                    {"idea_id": row["idea_id"], "text_content": row["text_content"],
+                     "similarity_score": round(float(row["similarity_score"]), 4)}
+                    for row in cur.fetchall()
+                ]
+    except Exception as e:
+        logger.error("Idea semantic search failed for user_id=%s: %s", user_id, e)
+        raise
+
+
+def delete_idea_embedding(idea_id: str):
+    """Delete the embedding record for an idea."""
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM idea_embeddings WHERE idea_id = %s", (idea_id,))
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to delete idea embedding for idea_id=%s: %s", idea_id, e)
+        raise
+
+
+# ---------------------
+# Content Embedding Operations
+# ---------------------
+
+
+def upsert_content_text_embedding(
+    content_id: str, user_id: str, text_content: str, embedding: list[float],
+):
+    """Insert or update the text embedding for content."""
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO content_embeddings (id, content_id, user_id, text_content, text_embedding, updated_at)
+                    VALUES (%s, %s, %s, %s, %s::vector, %s)
+                    ON CONFLICT (content_id) DO UPDATE SET
+                        text_content = EXCLUDED.text_content,
+                        text_embedding = EXCLUDED.text_embedding,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (str(uuid.uuid4()), content_id, user_id, text_content, str(embedding), datetime.now(timezone.utc)),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to upsert content text embedding for content_id=%s: %s", content_id, e)
+        raise
+
+
+def content_semantic_search(user_id: str, query_embedding: list[float], limit: int = 5) -> list[dict]:
+    """Find content most similar to a query using cosine distance."""
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
+                cur.execute(
+                    """
+                    SELECT content_id, text_content, 1 - (text_embedding <=> %s::vector) AS similarity_score
+                    FROM content_embeddings
+                    WHERE user_id = %s AND text_embedding IS NOT NULL
+                    ORDER BY text_embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (str(query_embedding), user_id, str(query_embedding), limit),
+                )
+                return [
+                    {"content_id": row["content_id"], "text_content": row["text_content"],
+                     "similarity_score": round(float(row["similarity_score"]), 4)}
+                    for row in cur.fetchall()
+                ]
+    except Exception as e:
+        logger.error("Content semantic search failed for user_id=%s: %s", user_id, e)
+        raise
+
+
+def delete_content_embedding(content_id: str):
+    """Delete the embedding record for content."""
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM content_embeddings WHERE content_id = %s", (content_id,))
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to delete content embedding for content_id=%s: %s", content_id, e)
+        raise
+
+
+# ---------------------
+# Project Embedding Operations
+# ---------------------
+
+
+def upsert_project_text_embedding(
+    project_id: str, user_id: str, text_content: str, embedding: list[float],
+):
+    """Insert or update the text embedding for a project."""
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO project_embeddings (id, project_id, user_id, text_content, text_embedding, updated_at)
+                    VALUES (%s, %s, %s, %s, %s::vector, %s)
+                    ON CONFLICT (project_id) DO UPDATE SET
+                        text_content = EXCLUDED.text_content,
+                        text_embedding = EXCLUDED.text_embedding,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (str(uuid.uuid4()), project_id, user_id, text_content, str(embedding), datetime.now(timezone.utc)),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to upsert project text embedding for project_id=%s: %s", project_id, e)
+        raise
+
+
+def project_semantic_search(user_id: str, query_embedding: list[float], limit: int = 5) -> list[dict]:
+    """Find projects most similar to a query using cosine distance."""
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
+                cur.execute(
+                    """
+                    SELECT project_id, text_content, 1 - (text_embedding <=> %s::vector) AS similarity_score
+                    FROM project_embeddings
+                    WHERE user_id = %s AND text_embedding IS NOT NULL
+                    ORDER BY text_embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (str(query_embedding), user_id, str(query_embedding), limit),
+                )
+                return [
+                    {"project_id": row["project_id"], "text_content": row["text_content"],
+                     "similarity_score": round(float(row["similarity_score"]), 4)}
+                    for row in cur.fetchall()
+                ]
+    except Exception as e:
+        logger.error("Project semantic search failed for user_id=%s: %s", user_id, e)
+        raise
+
+
+def delete_project_embedding(project_id: str):
+    """Delete the embedding record for a project."""
+    try:
+        with _pooled_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM project_embeddings WHERE project_id = %s", (project_id,))
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to delete project embedding for project_id=%s: %s", project_id, e)
+        raise
 
 
 def get_pending_syncs(limit: int = 20) -> list[dict]:
@@ -417,7 +690,8 @@ def get_pending_syncs(limit: int = 20) -> list[dict]:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, person_id, user_id, operation, retry_count
+                SELECT id, person_id, user_id, operation, retry_count,
+                       COALESCE(entity_type, 'person') AS entity_type
                 FROM pending_embedding_syncs
                 WHERE next_retry_at <= NOW()
                   AND retry_count < max_retries

@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
-from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey, Boolean, Index
+from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey, Boolean, Index, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -26,6 +26,7 @@ class User(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     phone = Column(String(15), unique=True, nullable=False, index=True)
+    name = Column(String(100), nullable=True)
     password_hash = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -57,6 +58,7 @@ class ChatMessage(Base):
     role = Column(String(20), nullable=False)  # 'user' or 'assistant'
     content = Column(Text, nullable=False)
     image_url = Column(String(512), nullable=True)
+    trace_json = Column(JSON, nullable=True)  # Agent/tool call trace for assistant messages
     timestamp = Column(DateTime, default=datetime.utcnow)
     
     __table_args__ = (
@@ -71,6 +73,16 @@ def init_db():
     try:
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables initialized successfully")
+
+        # Migrate: add trace_json column if it doesn't exist (safe for existing DBs)
+        with engine.connect() as conn:
+            from sqlalchemy import text, inspect
+            inspector = inspect(engine)
+            columns = [c["name"] for c in inspector.get_columns("chat_messages")]
+            if "trace_json" not in columns:
+                conn.execute(text("ALTER TABLE chat_messages ADD COLUMN trace_json JSON"))
+                conn.commit()
+                logger.info("Added trace_json column to chat_messages")
     except Exception as e:
         logger.critical("Failed to initialize database tables: %s", e)
         raise

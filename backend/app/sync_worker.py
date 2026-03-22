@@ -35,42 +35,96 @@ async def _process_pending_syncs():
     if not pending:
         return
 
+    # Dispatch tables for multi-entity support
+    _delete_funcs = {
+        "person": vector_db.delete_embedding,
+        "idea": vector_db.delete_idea_embedding,
+        "content": vector_db.delete_content_embedding,
+        "project": vector_db.delete_project_embedding,
+    }
+    _get_node_funcs = {
+        "person": graph_db.get_person_node,
+        "idea": graph_db.get_idea_node,
+        "content": graph_db.get_content_node,
+        "project": graph_db.get_project_node,
+    }
+
     for row in pending:
         sync_id = row["id"]
-        person_id = row["person_id"]
+        entity_id = row["person_id"]  # column name kept for backward compat
         user_id = row["user_id"]
         operation = row["operation"]
         retry_count = row["retry_count"]
+        entity_type = row.get("entity_type", "person")
 
         try:
             if operation == "delete":
-                await run_in_threadpool(vector_db.delete_embedding, person_id)
+                delete_fn = _delete_funcs.get(entity_type, vector_db.delete_embedding)
+                await run_in_threadpool(delete_fn, entity_id)
             else:
-                # upsert: fetch person from Neo4j, regenerate embedding
-                person = await graph_db.get_person_node(person_id)
-                if person is None:
-                    # Person was deleted from Neo4j; discard this sync
+                get_fn = _get_node_funcs.get(entity_type, graph_db.get_person_node)
+                entity = await get_fn(entity_id)
+                if entity is None:
                     await run_in_threadpool(vector_db.delete_pending_sync, sync_id)
-                    logger.info("[SYNC] Person %s no longer exists, discarding sync", person_id)
+                    logger.info("[SYNC] %s %s no longer exists, discarding sync", entity_type, entity_id)
                     continue
 
-                text_content, embedding = embedding_service.generate_person_embedding(
-                    name=person.get("name", ""),
-                    aliases=person.get("aliases", []),
-                    short_bio=person.get("short_bio", ""),
-                    contacts=person.get("contacts", {}),
-                )
-                await run_in_threadpool(
-                    vector_db.upsert_text_embedding,
-                    person_id=person_id,
-                    user_id=user_id,
-                    text_content=text_content,
-                    embedding=embedding,
-                )
+                if entity_type == "person":
+                    text_content, embedding = embedding_service.generate_person_embedding(
+                        name=entity.get("name", ""),
+                        aliases=entity.get("aliases", []),
+                        short_bio=entity.get("short_bio", ""),
+                        contacts=entity.get("contacts", {}),
+                    )
+                    await run_in_threadpool(
+                        vector_db.upsert_text_embedding,
+                        person_id=entity_id, user_id=user_id,
+                        text_content=text_content, embedding=embedding,
+                    )
+                elif entity_type == "idea":
+                    text_content, embedding = embedding_service.generate_idea_embedding(
+                        name=entity.get("name", ""),
+                        idea_type=entity.get("idea_type"),
+                        description=entity.get("description"),
+                        tags=entity.get("tags", []),
+                        notes=entity.get("notes"),
+                    )
+                    await run_in_threadpool(
+                        vector_db.upsert_idea_text_embedding,
+                        idea_id=entity_id, user_id=user_id,
+                        text_content=text_content, embedding=embedding,
+                    )
+                elif entity_type == "content":
+                    text_content, embedding = embedding_service.generate_content_embedding(
+                        title=entity.get("title", ""),
+                        content_type=entity.get("content_type"),
+                        author=entity.get("author"),
+                        personal_notes=entity.get("personal_notes"),
+                        tags=entity.get("tags", []),
+                    )
+                    await run_in_threadpool(
+                        vector_db.upsert_content_text_embedding,
+                        content_id=entity_id, user_id=user_id,
+                        text_content=text_content, embedding=embedding,
+                    )
+                elif entity_type == "project":
+                    text_content, embedding = embedding_service.generate_project_embedding(
+                        name=entity.get("name", ""),
+                        project_type=entity.get("project_type"),
+                        description=entity.get("description"),
+                        goal=entity.get("goal"),
+                        tags=entity.get("tags", []),
+                        notes=entity.get("notes"),
+                    )
+                    await run_in_threadpool(
+                        vector_db.upsert_project_text_embedding,
+                        project_id=entity_id, user_id=user_id,
+                        text_content=text_content, embedding=embedding,
+                    )
 
             # Success — remove the pending record
             await run_in_threadpool(vector_db.delete_pending_sync, sync_id)
-            logger.info("[SYNC] Successfully synced embedding for person %s (op=%s)", person_id, operation)
+            logger.info("[SYNC] Successfully synced embedding for %s %s (op=%s)", entity_type, entity_id, operation)
 
         except Exception as e:
             new_retry = retry_count + 1
@@ -83,8 +137,8 @@ async def _process_pending_syncs():
                 str(e),
             )
             logger.warning(
-                "[SYNC] Retry %d failed for person %s: %s. Next retry in %ds",
-                new_retry, person_id, e, backoff,
+                "[SYNC] Retry %d failed for %s %s: %s. Next retry in %ds",
+                new_retry, entity_type, entity_id, e, backoff,
             )
 
 

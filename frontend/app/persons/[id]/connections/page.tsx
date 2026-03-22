@@ -273,6 +273,79 @@ export default function PersonConnectionsPage() {
                     </span>
                   </div>
 
+                  {/* Occupation / Company */}
+                  {(selectedPerson.occupation || selectedPerson.company || selectedPerson.location) && (
+                    <div className="space-y-1">
+                      {(selectedPerson.occupation || selectedPerson.company) && (
+                        <p className="text-sm" style={{ color: 'var(--muted)' }}>
+                          {selectedPerson.occupation}{selectedPerson.occupation && selectedPerson.company ? ' at ' : ''}{selectedPerson.company}
+                        </p>
+                      )}
+                      {selectedPerson.location && (
+                        <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>{selectedPerson.location}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Tags */}
+                  {selectedPerson.tags && selectedPerson.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {selectedPerson.tags.map((tag, i) => (
+                        <span
+                          key={i}
+                          className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium"
+                          style={{ background: 'var(--surface-secondary)', color: 'var(--muted)', border: '1px solid var(--border)' }}
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Relationship properties */}
+                  {selectedRelationship && data && (() => {
+                    const conn = data.connections.find(c => c.person.id === selectedPerson.id);
+                    const props = conn?.properties || {};
+                    const hasProps = Object.keys(props).some(k => k !== 'created_at' && props[k]);
+                    if (!hasProps) return null;
+                    return (
+                      <div>
+                        <h4 className="text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: 'var(--muted)' }}>
+                          Relationship Details
+                        </h4>
+                        <div className="space-y-1">
+                          {props.strength && (
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px]" style={{ color: 'var(--muted)' }}>Strength</span>
+                              <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border)' }}>
+                                <div className="h-full rounded-full" style={{ width: `${Number(props.strength) * 100}%`, background: 'var(--accent)' }} />
+                              </div>
+                              <span className="text-[10px]" style={{ color: 'var(--foreground)' }}>{(Number(props.strength) * 100).toFixed(0)}%</span>
+                            </div>
+                          )}
+                          {props.context && (
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-[11px] font-medium shrink-0" style={{ color: 'var(--muted)' }}>Context</span>
+                              <span className="text-xs" style={{ color: 'var(--foreground)' }}>{props.context}</span>
+                            </div>
+                          )}
+                          {props.started_at && (
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-[11px] font-medium shrink-0" style={{ color: 'var(--muted)' }}>Since</span>
+                              <span className="text-xs" style={{ color: 'var(--foreground)' }}>{props.started_at}</span>
+                            </div>
+                          )}
+                          {props.notes && (
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-[11px] font-medium shrink-0" style={{ color: 'var(--muted)' }}>Notes</span>
+                              <span className="text-xs" style={{ color: 'var(--foreground)' }}>{props.notes}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Bio */}
                   {selectedPerson.short_bio && (
                     <div>

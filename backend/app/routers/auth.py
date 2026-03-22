@@ -31,7 +31,7 @@ def register(
         )
 
     try:
-        user = crud.create_user(db, user_data.phone, user_data.password)
+        user = crud.create_user(db, user_data.phone, user_data.password, name=user_data.name)
         logger.info("New user registered: user_id=%s", user.id)
         return user
     except IntegrityError:

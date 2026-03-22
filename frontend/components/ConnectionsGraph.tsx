@@ -61,6 +61,12 @@ const REL_COLORS: Record<string, string> = {
   PARTNER: '#ec4899',
   NEIGHBOR: '#84cc16',
   CLASSMATE: '#8b5cf6',
+  EMPLOYS: '#f97316',
+  MARRIED_TO: '#e11d48',
+  PARENT_OF: '#a855f7',
+  INTRODUCED_BY: '#14b8a6',
+  RIVAL_OF: '#dc2626',
+  FORMERLY_WORKED_WITH: '#9ca3af',
 };
 
 function getRelColor(rel: string): string {

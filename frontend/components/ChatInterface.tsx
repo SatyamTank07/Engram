@@ -4,12 +4,14 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import toast from 'react-hot-toast';
 import { Camera, Send, MessageSquare, Copy, Check, Bot } from 'lucide-react';
-import { Message, getSessionMessages, sendMessageStream, validateImageFile } from '@/lib/api';
+import { Message, RequestTrace, getSessionMessages, sendMessageStream, validateImageFile } from '@/lib/api';
+import TraceViewer from './TraceViewer';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 interface ChatInterfaceProps {
   sessionId: string | null;
+  onMessageSent?: () => void;
 }
 
 function relativeTime(dateStr: string): string {
@@ -75,15 +77,17 @@ function CodeBlock({ children, className }: { children: React.ReactNode; classNa
   );
 }
 
-export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
+export default function ChatInterface({ sessionId, onMessageSent }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [attachedImage, setAttachedImage] = useState<File | null>(null);
   const [imageError, setImageError] = useState('');
+  const [traces, setTraces] = useState<Record<string, RequestTrace>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const isSendingRef = useRef(false);
+  const latestAssistantIdRef = useRef<string>('');
 
   const previewUrl = useMemo(() => {
     return attachedImage ? URL.createObjectURL(attachedImage) : null;
@@ -107,7 +111,19 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
     if (!sessionId) return;
     try {
       const data = await getSessionMessages(sessionId);
-      if (!isSendingRef.current) setMessages(data);
+      if (!isSendingRef.current) {
+        setMessages(data);
+        // Restore saved traces from message history
+        const savedTraces: Record<string, RequestTrace> = {};
+        for (const msg of data) {
+          if (msg.role === 'assistant' && msg.trace_json) {
+            savedTraces[msg.id] = msg.trace_json;
+          }
+        }
+        if (Object.keys(savedTraces).length > 0) {
+          setTraces(prev => ({ ...prev, ...savedTraces }));
+        }
+      }
     } catch {
       toast.error('Failed to load messages');
     }
@@ -159,6 +175,7 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
     setMessages(prev => [...prev, tempUserMessage, streamingMessage]);
 
     try {
+      latestAssistantIdRef.current = streamingMsgId;
       await sendMessageStream(
         sessionId, userMessage, imageFile || undefined,
         (token: string) => {
@@ -167,13 +184,27 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
           );
         },
         (data) => {
-          setMessages(prev => [
-            ...prev.filter(m => m.id !== tempUserMessage.id && m.id !== streamingMsgId),
-            data.user_message,
-            data.assistant_message,
-          ]);
+          if (data.save_error) {
+            // DB save failed — keep the streamed content visible as-is
+            toast.error(data.save_error);
+            const fallbackId = `fallback-${Date.now()}`;
+            latestAssistantIdRef.current = fallbackId;
+            setMessages(prev =>
+              prev.filter(m => m.id !== tempUserMessage.id).map(m =>
+                m.id === streamingMsgId ? { ...m, id: fallbackId } : m
+              )
+            );
+          } else {
+            latestAssistantIdRef.current = data.assistant_message?.id || streamingMsgId;
+            setMessages(prev => [
+              ...prev.filter(m => m.id !== tempUserMessage.id && m.id !== streamingMsgId),
+              data.user_message,
+              data.assistant_message,
+            ]);
+          }
           isSendingRef.current = false;
           setLoading(false);
+          onMessageSent?.();
           if (localImageUrl) URL.revokeObjectURL(localImageUrl);
         },
         (err) => {
@@ -189,6 +220,11 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
           isSendingRef.current = false;
           setLoading(false);
           if (localImageUrl) URL.revokeObjectURL(localImageUrl);
+        },
+        (traceData) => {
+          // Associate trace with the final assistant message ID
+          const msgId = latestAssistantIdRef.current || streamingMsgId;
+          setTraces(prev => ({ ...prev, [msgId]: traceData }));
         },
       );
     } catch {
@@ -334,6 +370,11 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
                   <CopyButton text={message.content} />
                 )}
               </div>
+
+              {/* Agent trace viewer */}
+              {message.role === 'assistant' && traces[message.id] && (
+                <TraceViewer trace={traces[message.id]} />
+              )}
             </div>
 
             {/* Avatar for user */}
