@@ -12,11 +12,11 @@ logger = logging.getLogger(__name__)
 
 # User operations
 
-def create_user(db: Session, phone: str, password: str) -> database.User:
+def create_user(db: Session, phone: str, password: str, name: str | None = None) -> database.User:
     """Create a new user."""
     try:
         hashed_password = auth.hash_password(password)
-        user = database.User(phone=phone, password_hash=hashed_password)
+        user = database.User(phone=phone, password_hash=hashed_password, name=name)
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -81,10 +81,10 @@ def update_session_title(db: Session, session_id: str, title: str):
         raise
 
 
-def save_message(db: Session, session_id: str, role: str, content: str, image_url: str | None = None) -> database.ChatMessage:
+def save_message(db: Session, session_id: str, role: str, content: str, image_url: str | None = None, trace_json: dict | None = None) -> database.ChatMessage:
     """Save a message to a chat session."""
     try:
-        message = database.ChatMessage(session_id=session_id, role=role, content=content, image_url=image_url)
+        message = database.ChatMessage(session_id=session_id, role=role, content=content, image_url=image_url, trace_json=trace_json)
         db.add(message)
         db.commit()
         db.refresh(message)

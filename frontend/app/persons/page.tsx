@@ -4,12 +4,13 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
-import { ArrowLeft, Users, Search, Upload, UserPlus, Share2 } from 'lucide-react';
+import { ArrowLeft, Users, Search, Upload, UserPlus, Share2, ChevronDown } from 'lucide-react';
 import { isAuthenticated } from '@/lib/auth';
 import Skeleton from '@/components/Skeleton';
 import {
   Person,
   PersonCreate,
+  PaginatedPersonsResponse,
   FaceIdentifyResponse,
   getPersons,
   createPerson,
@@ -20,6 +21,7 @@ import {
 import FaceOverlay from '@/components/FaceOverlay';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const PAGE_SIZE = 50;
 
 function confidenceLabel(score: number): { text: string; color: string } {
   if (score >= 0.85) return { text: 'Strong match', color: 'var(--success)' };
@@ -29,13 +31,31 @@ function confidenceLabel(score: number): { text: string; color: string } {
 
 const emptyForm: PersonCreate = { name: '', aliases: [], contacts: {}, short_bio: '', trust_score: 0 };
 
+const FREQ_TABS = [
+  { label: 'All', value: '' },
+  { label: 'Daily', value: 'daily' },
+  { label: 'Weekly', value: 'weekly' },
+  { label: 'Monthly', value: 'monthly' },
+  { label: 'Rarely', value: 'rarely' },
+];
+
 export default function PersonsPage() {
   const router = useRouter();
   const [persons, setPersons] = useState<Person[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [offset, setOffset] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
 
+  // Filters
+  const [filterFreq, setFilterFreq] = useState('');
+  const [filterLocation, setFilterLocation] = useState('');
+  const [filterOccupation, setFilterOccupation] = useState('');
+  const [showFilters, setShowFilters] = useState(false);
+
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [newPerson, setNewPerson] = useState<PersonCreate>(emptyForm);
   const [creating, setCreating] = useState(false);
   const [nameError, setNameError] = useState(false);
@@ -49,21 +69,39 @@ export default function PersonsPage() {
 
   const [faceUploadStatus, setFaceUploadStatus] = useState<Record<string, 'uploading' | 'done' | 'error'>>({});
   const [faceUploadError, setFaceUploadError] = useState<Record<string, string>>({});
-  const faceInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
     if (!isAuthenticated()) { router.push('/login'); return; }
-    loadPersons();
+    loadPersons(true);
   }, [router]);
 
-  async function loadPersons() {
+  // Reload when filters change
+  useEffect(() => {
+    if (!loading) loadPersons(true);
+  }, [filterFreq, filterLocation, filterOccupation]);
+
+  async function loadPersons(reset = false) {
+    const newOffset = reset ? 0 : offset;
+    if (reset) setLoading(true); else setLoadingMore(true);
     try {
-      const data = await getPersons();
-      setPersons(data);
+      const params: Record<string, any> = { limit: PAGE_SIZE, offset: newOffset };
+      if (filterFreq) params.interaction_frequency = filterFreq;
+      if (filterLocation) params.location = filterLocation;
+      if (filterOccupation) params.occupation = filterOccupation;
+
+      const data: PaginatedPersonsResponse = await getPersons(params);
+      if (reset) {
+        setPersons(data.items);
+      } else {
+        setPersons(prev => [...prev, ...data.items]);
+      }
+      setTotalCount(data.total);
+      setOffset(newOffset + data.items.length);
     } catch {
       toast.error('Failed to load people');
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   }
 
@@ -75,8 +113,10 @@ export default function PersonsPage() {
     try {
       const created = await createPerson(newPerson);
       setPersons([created, ...persons]);
+      setTotalCount(prev => prev + 1);
       setNewPerson(emptyForm);
       setShowAddForm(false);
+      setShowAdvanced(false);
       toast.success(`${created.name} added`);
     } catch {
       toast.error('Failed to create person');
@@ -139,8 +179,13 @@ export default function PersonsPage() {
     const q = searchQuery.toLowerCase();
     return p.name.toLowerCase().includes(q) ||
       p.aliases.some(a => a.toLowerCase().includes(q)) ||
-      (p.short_bio || '').toLowerCase().includes(q);
+      (p.short_bio || '').toLowerCase().includes(q) ||
+      (p.occupation || '').toLowerCase().includes(q) ||
+      (p.company || '').toLowerCase().includes(q) ||
+      (p.location || '').toLowerCase().includes(q);
   });
+
+  const hasMore = persons.length < totalCount;
 
   if (loading) {
     return (
@@ -219,17 +264,90 @@ export default function PersonsPage() {
                 className="w-full rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus-visible:ring-2 transition-colors"
                 style={{ border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)' }}
               />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <input
+                  type="text"
+                  placeholder="Occupation"
+                  value={newPerson.occupation || ''}
+                  onChange={e => setNewPerson({ ...newPerson, occupation: e.target.value })}
+                  className="w-full rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus-visible:ring-2 transition-colors"
+                  style={{ border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)' }}
+                />
+                <input
+                  type="text"
+                  placeholder="Company"
+                  value={newPerson.company || ''}
+                  onChange={e => setNewPerson({ ...newPerson, company: e.target.value })}
+                  className="w-full rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus-visible:ring-2 transition-colors"
+                  style={{ border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)' }}
+                />
+                <input
+                  type="text"
+                  placeholder="Location"
+                  value={newPerson.location || ''}
+                  onChange={e => setNewPerson({ ...newPerson, location: e.target.value })}
+                  className="w-full rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus-visible:ring-2 transition-colors"
+                  style={{ border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)' }}
+                />
+              </div>
               <input
                 type="text"
-                placeholder="Aliases (comma-separated)"
-                value={newPerson.aliases?.join(', ') || ''}
+                placeholder="Tags (comma-separated)"
+                value={newPerson.tags?.join(', ') || ''}
                 onChange={e => setNewPerson({
                   ...newPerson,
-                  aliases: e.target.value.split(',').map(s => s.trim()).filter(Boolean),
+                  tags: e.target.value.split(',').map(s => s.trim()).filter(Boolean),
                 })}
                 className="w-full rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus-visible:ring-2 transition-colors"
                 style={{ border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)' }}
               />
+
+              {/* Advanced toggle */}
+              <button
+                type="button"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                className="flex items-center gap-1 text-xs transition-colors"
+                style={{ color: 'var(--accent)' }}
+              >
+                <ChevronDown size={12} className={showAdvanced ? 'rotate-180 transition-transform' : 'transition-transform'} />
+                {showAdvanced ? 'Hide advanced fields' : 'Show advanced fields'}
+              </button>
+
+              {showAdvanced && (
+                <div className="space-y-3 pt-2">
+                  <input
+                    type="text"
+                    placeholder="Aliases (comma-separated)"
+                    value={newPerson.aliases?.join(', ') || ''}
+                    onChange={e => setNewPerson({
+                      ...newPerson,
+                      aliases: e.target.value.split(',').map(s => s.trim()).filter(Boolean),
+                    })}
+                    className="w-full rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus-visible:ring-2 transition-colors"
+                    style={{ border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)' }}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Interests (comma-separated)"
+                    value={newPerson.interests?.join(', ') || ''}
+                    onChange={e => setNewPerson({
+                      ...newPerson,
+                      interests: e.target.value.split(',').map(s => s.trim()).filter(Boolean),
+                    })}
+                    className="w-full rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus-visible:ring-2 transition-colors"
+                    style={{ border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)' }}
+                  />
+                  <textarea
+                    placeholder="Notes"
+                    value={newPerson.notes || ''}
+                    onChange={e => setNewPerson({ ...newPerson, notes: e.target.value })}
+                    rows={3}
+                    className="w-full rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus-visible:ring-2 transition-colors resize-y"
+                    style={{ border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)' }}
+                  />
+                </div>
+              )}
+
               <button
                 type="submit"
                 disabled={creating}
@@ -411,32 +529,89 @@ export default function PersonsPage() {
           )}
         </div>
 
-        {/* Search People */}
-        <div className="relative">
-          <Search
-            size={14}
-            className="absolute left-3 top-1/2 -translate-y-1/2"
-            style={{ color: 'var(--muted-foreground)' }}
-          />
-          <input
-            type="text"
-            placeholder="Search people..."
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            className="w-full pl-8 pr-3 py-2.5 rounded-lg text-sm focus:outline-none focus-visible:ring-2 transition-colors"
-            style={{
-              background: 'var(--input-bg)',
-              border: '1px solid var(--border)',
-              color: 'var(--foreground)',
-            }}
-            aria-label="Search people by name, alias, or bio"
-          />
+        {/* Search + Filters */}
+        <div className="space-y-3">
+          <div className="relative">
+            <Search
+              size={14}
+              className="absolute left-3 top-1/2 -translate-y-1/2"
+              style={{ color: 'var(--muted-foreground)' }}
+            />
+            <input
+              type="text"
+              placeholder="Search people..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              className="w-full pl-8 pr-3 py-2.5 rounded-lg text-sm focus:outline-none focus-visible:ring-2 transition-colors"
+              style={{
+                background: 'var(--input-bg)',
+                border: '1px solid var(--border)',
+                color: 'var(--foreground)',
+              }}
+              aria-label="Search people by name, alias, bio, occupation, company, or location"
+            />
+          </div>
+
+          {/* Interaction frequency tabs */}
+          <div className="flex flex-wrap gap-1.5">
+            {FREQ_TABS.map(tab => (
+              <button
+                key={tab.value}
+                onClick={() => setFilterFreq(tab.value)}
+                className="px-3 py-1 rounded-full text-xs font-medium transition-colors"
+                style={{
+                  background: filterFreq === tab.value ? 'var(--accent)' : 'var(--surface)',
+                  color: filterFreq === tab.value ? 'white' : 'var(--muted)',
+                  border: `1px solid ${filterFreq === tab.value ? 'var(--accent)' : 'var(--border)'}`,
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              className="px-3 py-1 rounded-full text-xs font-medium transition-colors flex items-center gap-1"
+              style={{
+                background: 'var(--surface)',
+                color: 'var(--muted)',
+                border: '1px solid var(--border)',
+              }}
+            >
+              <ChevronDown size={10} className={showFilters ? 'rotate-180 transition-transform' : 'transition-transform'} />
+              More Filters
+            </button>
+          </div>
+
+          {showFilters && (
+            <div className="flex flex-wrap gap-2">
+              <input
+                type="text"
+                placeholder="Filter by location"
+                value={filterLocation}
+                onChange={e => setFilterLocation(e.target.value)}
+                onBlur={() => loadPersons(true)}
+                onKeyDown={e => { if (e.key === 'Enter') loadPersons(true); }}
+                className="rounded-lg px-3 py-1.5 text-xs focus:outline-none focus-visible:ring-2 transition-colors"
+                style={{ border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)', width: 150 }}
+              />
+              <input
+                type="text"
+                placeholder="Filter by occupation"
+                value={filterOccupation}
+                onChange={e => setFilterOccupation(e.target.value)}
+                onBlur={() => loadPersons(true)}
+                onKeyDown={e => { if (e.key === 'Enter') loadPersons(true); }}
+                className="rounded-lg px-3 py-1.5 text-xs focus:outline-none focus-visible:ring-2 transition-colors"
+                style={{ border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)', width: 150 }}
+              />
+            </div>
+          )}
         </div>
 
         {/* People List */}
         <div>
           <h2 className="text-sm font-semibold mb-3" style={{ color: 'var(--foreground)' }}>
-            Known People ({filteredPersons.length})
+            Known People ({totalCount})
           </h2>
 
           {filteredPersons.length === 0 ? (
@@ -486,10 +661,34 @@ export default function PersonsPage() {
                       )}
                       <div className="min-w-0">
                         <p className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>{person.name}</p>
-                        {person.short_bio && (
+                        {/* Show occupation/company/location */}
+                        {(person.occupation || person.company || person.location) && (
+                          <p className="text-xs truncate" style={{ color: 'var(--muted)' }}>
+                            {person.occupation}{person.occupation && person.company ? ' at ' : ''}{person.company}
+                            {(person.occupation || person.company) && person.location ? ' · ' : ''}{person.location}
+                          </p>
+                        )}
+                        {!person.occupation && !person.company && person.short_bio && (
                           <p className="text-xs truncate" style={{ color: 'var(--muted)' }}>{person.short_bio}</p>
                         )}
-                        {person.aliases.length > 0 && (
+                        {/* Tags as pills */}
+                        {person.tags && person.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {person.tags.slice(0, 3).map((tag, i) => (
+                              <span
+                                key={i}
+                                className="inline-flex items-center px-1.5 py-0 rounded text-[10px] font-medium"
+                                style={{ background: 'var(--surface-secondary)', color: 'var(--muted)', border: '1px solid var(--border)' }}
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                            {person.tags.length > 3 && (
+                              <span className="text-[10px]" style={{ color: 'var(--muted)' }}>+{person.tags.length - 3}</span>
+                            )}
+                          </div>
+                        )}
+                        {person.aliases.length > 0 && !person.tags?.length && (
                           <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
                             aka {person.aliases.join(', ')}
                           </p>
@@ -527,6 +726,24 @@ export default function PersonsPage() {
                   </div>
                 );
               })}
+
+              {/* Load More */}
+              {hasMore && (
+                <div className="text-center pt-4">
+                  <button
+                    onClick={() => loadPersons(false)}
+                    disabled={loadingMore}
+                    className="px-6 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                    style={{
+                      border: '1px solid var(--border)',
+                      color: 'var(--accent)',
+                      background: 'var(--surface)',
+                    }}
+                  >
+                    {loadingMore ? 'Loading...' : `Load More (${totalCount - persons.length} remaining)`}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

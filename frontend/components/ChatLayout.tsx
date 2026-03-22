@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { Menu } from 'lucide-react';
 import SessionSidebar from '@/components/SessionSidebar';
@@ -16,7 +16,12 @@ interface ChatLayoutProps {
 export default function ChatLayout({ sessionId }: ChatLayoutProps) {
   const [isChecking, setIsChecking] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0);
   const router = useRouter();
+
+  const handleMessageSent = useCallback(() => {
+    setSidebarRefreshKey(k => k + 1);
+  }, []);
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -106,13 +111,14 @@ export default function ChatLayout({ sessionId }: ChatLayoutProps) {
             onSessionSelect={handleSessionSelect}
             onNewChat={handleNewChat}
             onLogout={handleLogout}
+            refreshKey={sidebarRefreshKey}
           />
         </ErrorBoundary>
       </div>
 
       {/* Main chat area */}
       <ErrorBoundary>
-        <ChatInterface sessionId={sessionId} />
+        <ChatInterface sessionId={sessionId} onMessageSent={handleMessageSent} />
       </ErrorBoundary>
     </div>
   );

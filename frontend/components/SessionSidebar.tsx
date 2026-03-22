@@ -6,7 +6,7 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 import {
   Plus, Users, MessageSquare, Trash2, LogOut, Sun, Moon, Search,
-  MessageSquarePlus,
+  MessageSquarePlus, Lightbulb, BookOpen, Target,
 } from 'lucide-react';
 import { useTheme } from '@/components/ThemeProvider';
 import ConfirmDialog from '@/components/ConfirmDialog';
@@ -18,6 +18,7 @@ interface SessionSidebarProps {
   onSessionSelect: (sessionId: string) => void;
   onNewChat: () => void;
   onLogout?: () => void;
+  refreshKey?: number;
 }
 
 export default function SessionSidebar({
@@ -25,6 +26,7 @@ export default function SessionSidebar({
   onSessionSelect,
   onNewChat,
   onLogout,
+  refreshKey,
 }: SessionSidebarProps) {
   const { theme, toggleTheme } = useTheme();
   const router = useRouter();
@@ -46,7 +48,7 @@ export default function SessionSidebar({
 
   useEffect(() => {
     loadSessions();
-  }, []);
+  }, [refreshKey]);
 
   const handleNewChat = async () => {
     try {
@@ -113,18 +115,56 @@ export default function SessionSidebar({
           New Chat
         </button>
 
-        <Link
-          href="/persons"
-          className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg mb-3 text-sm font-medium transition-colors focus-visible:ring-2"
-          style={{
-            background: 'var(--surface)',
-            color: 'var(--foreground)',
-            border: '1px solid var(--border)',
-          }}
-        >
-          <Users size={16} />
-          People
-        </Link>
+        <div className="grid grid-cols-2 gap-1.5 mb-3">
+          <Link
+            href="/persons"
+            className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-medium transition-colors focus-visible:ring-2"
+            style={{
+              background: 'var(--surface)',
+              color: 'var(--foreground)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            <Users size={14} />
+            People
+          </Link>
+          <Link
+            href="/ideas"
+            className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-medium transition-colors focus-visible:ring-2"
+            style={{
+              background: 'var(--surface)',
+              color: 'var(--foreground)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            <Lightbulb size={14} />
+            Ideas
+          </Link>
+          <Link
+            href="/content"
+            className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-medium transition-colors focus-visible:ring-2"
+            style={{
+              background: 'var(--surface)',
+              color: 'var(--foreground)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            <BookOpen size={14} />
+            Content
+          </Link>
+          <Link
+            href="/projects"
+            className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-medium transition-colors focus-visible:ring-2"
+            style={{
+              background: 'var(--surface)',
+              color: 'var(--foreground)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            <Target size={14} />
+            Projects
+          </Link>
+        </div>
 
         {/* Search sessions */}
         <div className="relative mb-3">

@@ -45,19 +45,22 @@ async def chat(
         crud.update_session_title(db, chat_request.session_id, title)
 
     try:
-        ai_response = await agent.get_agent_response(
+        ai_response, trace_data = await agent.get_agent_response(
             chat_request.message, chat_history, chat_request.image_url,
             user_id=str(current_user.id),
+            user_name=current_user.name,
         )
 
         assistant_message = crud.save_message(
             db, chat_request.session_id, "assistant", ai_response,
+            trace_json=trace_data,
         )
 
         return schemas.ChatResponse(
             session_id=chat_request.session_id,
             user_message=user_message,
             assistant_message=assistant_message,
+            trace=trace_data,
         )
 
     except Exception as e:
@@ -102,6 +105,7 @@ async def chat_stream(
 
     # Extract values before request-scoped db session closes
     _user_id = str(current_user.id)
+    _user_name = current_user.name
     _session_id = chat_request.session_id
     _message = chat_request.message
     _image_url = chat_request.image_url
@@ -110,28 +114,53 @@ async def chat_stream(
         import json as _json
 
         full_response = []
+        trace_data = None
         try:
             async for token in agent.stream_agent_response(
                 _message, chat_history, _image_url,
                 user_id=_user_id,
+                user_name=_user_name,
             ):
+                # Intercept trace marker from the agent stream
+                if isinstance(token, str) and token.startswith("__TRACE__:"):
+                    try:
+                        trace_data = _json.loads(token[len("__TRACE__:"):])
+                    except _json.JSONDecodeError:
+                        pass
+                    continue
                 full_response.append(token)
                 yield {"event": "token", "data": _json.dumps({"token": token})}
 
             complete_text = "".join(full_response)
-            gen_db = database.SessionLocal()
             try:
-                assistant_message = crud.save_message(
-                    gen_db, _session_id, "assistant", complete_text,
-                )
-                asst_msg_dict = schemas.MessageResponse.model_validate(assistant_message).model_dump(mode="json")
-            finally:
-                gen_db.close()
+                gen_db = database.SessionLocal()
+                try:
+                    assistant_message = crud.save_message(
+                        gen_db, _session_id, "assistant", complete_text,
+                        trace_json=trace_data,
+                    )
+                    asst_msg_dict = schemas.MessageResponse.model_validate(assistant_message).model_dump(mode="json")
+                finally:
+                    gen_db.close()
 
-            yield {
-                "event": "done",
-                "data": _json.dumps({"user_message": user_msg_dict, "assistant_message": asst_msg_dict}),
-            }
+                yield {
+                    "event": "done",
+                    "data": _json.dumps({"user_message": user_msg_dict, "assistant_message": asst_msg_dict}),
+                }
+                if trace_data:
+                    yield {"event": "trace", "data": _json.dumps(trace_data)}
+            except Exception as db_err:
+                logger.error("Failed to save streamed response for session %s: %s", _session_id, db_err)
+                yield {
+                    "event": "done",
+                    "data": _json.dumps({
+                        "user_message": user_msg_dict,
+                        "assistant_message": None,
+                        "save_error": "Response was generated but could not be saved.",
+                    }),
+                }
+                if trace_data:
+                    yield {"event": "trace", "data": _json.dumps(trace_data)}
 
         except Exception as e:
             logger.exception("Streaming chat error for session %s: %s", _session_id, e)

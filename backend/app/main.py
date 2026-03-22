@@ -17,7 +17,12 @@ from fastapi.staticfiles import StaticFiles
 from slowapi.errors import RateLimitExceeded
 
 from . import database, vector_db, graph_db, face_service, sync_worker, auth
-from .routers import auth as auth_router, chat as chat_router, sessions as sessions_router, persons as persons_router, upload as upload_router
+from .routers import (
+    auth as auth_router, chat as chat_router, sessions as sessions_router,
+    persons as persons_router, upload as upload_router,
+    ideas as ideas_router, content as content_router,
+    projects as projects_router, entities as entities_router,
+)
 from .routers.deps import limiter, UPLOAD_DIR
 
 
@@ -189,4 +194,8 @@ app.include_router(auth_router.router)
 app.include_router(sessions_router.router)
 app.include_router(chat_router.router)
 app.include_router(persons_router.router)
+app.include_router(ideas_router.router)
+app.include_router(content_router.router)
+app.include_router(projects_router.router)
+app.include_router(entities_router.router)
 app.include_router(upload_router.router)

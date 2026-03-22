@@ -31,9 +31,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONPATH="/app"
 
 # Preserve repo directory structure so imports like
-# "from backend.app import ..." and "from mcp_server.tools import ..." work
+# "from backend.app import ...", "from mcp_server.tools import ...",
+# and "from agents.* import ..." work
 COPY backend/ /app/backend/
 COPY mcp_server/ /app/mcp_server/
+COPY agents/ /app/agents/
 
 # Create directories and set ownership (including insightface model cache)
 RUN mkdir -p /app/backend/uploads/chat /app/backend/uploads/faces /home/engram/.insightface \
