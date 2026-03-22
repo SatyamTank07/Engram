@@ -2,6 +2,7 @@
 Agent network — in-process dispatch to sub-agents.
 
 Runs each sub-agent's LangChain tool-loop directly in the same process.
+Uses Jinja2-rendered prompts with dynamic user context injection.
 """
 
 import json
@@ -15,27 +16,27 @@ from agents.common.config import MAX_TOOL_ITERATIONS
 from agents.common.llm_factory import get_llm
 from backend.app.tracing import start_agent_span, end_agent_span, log_tool_call
 
-# Sub-agent tool factories + system prompts
+# Sub-agent tool factories + prompt renderers
 from agents.person_agent.tools import make_person_tools
-from agents.person_agent.system_prompt import PERSON_AGENT_PROMPT
+from agents.person_agent.system_prompt import get_person_prompt
 
 from agents.idea_agent.tools import make_idea_tools
-from agents.idea_agent.system_prompt import IDEA_AGENT_PROMPT
+from agents.idea_agent.system_prompt import get_idea_prompt
 
 from agents.content_agent.tools import make_content_tools
-from agents.content_agent.system_prompt import CONTENT_AGENT_PROMPT
+from agents.content_agent.system_prompt import get_content_prompt
 
 from agents.project_agent.tools import make_project_tools
-from agents.project_agent.system_prompt import PROJECT_AGENT_PROMPT
+from agents.project_agent.system_prompt import get_project_prompt
 
 logger = logging.getLogger(__name__)
 
-# Registry: agent name → (tool factory, system prompt)
+# Registry: agent name → (tool factory, prompt renderer)
 AGENT_REGISTRY = {
-    "person_agent": (make_person_tools, PERSON_AGENT_PROMPT),
-    "idea_agent": (make_idea_tools, IDEA_AGENT_PROMPT),
-    "content_agent": (make_content_tools, CONTENT_AGENT_PROMPT),
-    "project_agent": (make_project_tools, PROJECT_AGENT_PROMPT),
+    "person_agent": (make_person_tools, get_person_prompt),
+    "idea_agent": (make_idea_tools, get_idea_prompt),
+    "content_agent": (make_content_tools, get_content_prompt),
+    "project_agent": (make_project_tools, get_project_prompt),
 }
 
 
@@ -102,7 +103,7 @@ async def send_to_agent(agent_name: str, task_text: str, user_id: str, user_name
         agent_name: Key in AGENT_REGISTRY (e.g. "person_agent").
         task_text: The natural-language task description for the sub-agent.
         user_id: Authenticated user ID — passed to tool factories.
-        user_name: Authenticated user's display name — injected into system prompt.
+        user_name: Authenticated user's display name — injected into system prompt via Jinja2.
 
     Returns:
         The text response from the sub-agent, or an error string.
@@ -111,11 +112,10 @@ async def send_to_agent(agent_name: str, task_text: str, user_id: str, user_name
     if not entry:
         return f"Error: Unknown agent '{agent_name}'"
 
-    make_tools, system_prompt = entry
+    make_tools, get_prompt = entry
 
-    # Inject user name into system prompt so sub-agent knows who "I/me/my" refers to
-    if user_name:
-        system_prompt = f"\n\nUSER IDENTITY: The user's name is {user_name}. When they say 'I', 'me', 'my', 'mine', they refer to {user_name}. Use '{user_name}' as the relationship_with value when the user mentions their own relationships." + system_prompt
+    # Render system prompt with user context via Jinja2
+    system_prompt = get_prompt(user_name=user_name)
 
     try:
         tools = make_tools(user_id)

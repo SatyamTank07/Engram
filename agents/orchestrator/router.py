@@ -26,7 +26,7 @@ if _project_root not in sys.path:
 from agents.common.config import MAX_TOOL_ITERATIONS
 from agents.common.llm_factory import get_llm
 from backend.app.tracing import start_agent_span, end_agent_span, log_tool_call
-from agents.orchestrator.system_prompt import ORCHESTRATOR_PROMPT
+from agents.orchestrator.system_prompt import get_orchestrator_prompt
 from agents.orchestrator.schemas import RouteToAgentInput
 from agents.orchestrator.agent_network import send_to_agent
 from agents.orchestrator.cross_entity_tools import make_cross_entity_tools
@@ -97,9 +97,8 @@ async def route_message(
 
     llm_with_tools = llm.bind_tools(all_tools)
 
-    prompt = ORCHESTRATOR_PROMPT
-    if user_name:
-        prompt += f"\n\nUSER IDENTITY: The user's name is {user_name}. When routing tasks, include the user's name so sub-agents know who 'I', 'me', 'my' refers to."
+    # Render orchestrator prompt with user context via Jinja2
+    prompt = get_orchestrator_prompt(user_name=user_name)
 
     messages = [SystemMessage(content=prompt)]
 
