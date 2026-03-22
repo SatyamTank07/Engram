@@ -263,7 +263,14 @@ async def get_person_tool(user_id: str, person_id: str) -> dict:
             return {"success": False, "message": f"Person with ID {person_id} not found"}
         if person.get("user_id") != user_id:
             return {"success": False, "message": "Access denied: This person belongs to a different user"}
-        return {"success": True, "person": person}
+        # Also fetch relationships so callers get a complete picture
+        relationships = await graph_db.get_relationships(person_id)
+        return {
+            "success": True,
+            "person": person,
+            "relationships": relationships,
+            "relationship_count": len(relationships),
+        }
     except Exception as e:
         logger.exception("[get_person] failed")
         return {"success": False, "message": f"Error retrieving person: {str(e)}"}

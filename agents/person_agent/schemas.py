@@ -3,7 +3,7 @@ Pydantic input schemas for person-related LangChain tools.
 Extracted from backend/app/agent.py — only person schemas.
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Literal, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -106,40 +106,19 @@ class SearchPersonInput(BaseModel):
     search_term: str = Field(..., description="Name or partial name to search for")
 
 
-class AddRelationshipInput(BaseModel):
+class ManageRelationshipInput(BaseModel):
+    action: Literal["add", "update", "delete"] = Field(..., description="Action to perform: 'add', 'update', or 'delete'")
     from_person_name: str = Field(..., description="Name of the first person")
     to_person_name: str = Field(..., description="Name of the second person")
-    relationship_type: str = Field(..., description="Type of relationship: KNOWS, FRIEND, FAMILY, COLLEAGUE, WORKS_WITH, MANAGES, REPORTS_TO, MENTOR, PARTNER, NEIGHBOR, CLASSMATE, EMPLOYS, MARRIED_TO, PARENT_OF, INTRODUCED_BY, RIVAL_OF, FORMERLY_WORKED_WITH")
-    notes: Optional[str] = Field(default=None, description="Optional notes about the relationship")
+    relationship_type: str = Field(..., description="Type: KNOWS, FRIEND, FAMILY, COLLEAGUE, WORKS_WITH, MANAGES, REPORTS_TO, MENTOR, PARTNER, NEIGHBOR, CLASSMATE, EMPLOYS, MARRIED_TO, PARENT_OF, INTRODUCED_BY, RIVAL_OF, FORMERLY_WORKED_WITH")
+    notes: Optional[str] = Field(default=None, description="Notes about the relationship")
     strength: Optional[float] = Field(default=None, description="Relationship strength (0.0 to 1.0)")
     context: Optional[str] = Field(default=None, description="Context of the relationship")
+    started_at: Optional[str] = Field(default=None, description="When the relationship started (update only)")
+    ended_at: Optional[str] = Field(default=None, description="When the relationship ended (update only)")
 
 
-class GetRelationshipsInput(BaseModel):
-    person_name: str = Field(..., description="Name of the person to find relationships for")
-
-
-class UpdateRelationshipInput(BaseModel):
-    from_person_name: str = Field(..., description="Name of the first person")
-    to_person_name: str = Field(..., description="Name of the second person")
-    relationship_type: str = Field(..., description="Type of relationship")
-    strength: Optional[float] = Field(default=None, description="Relationship strength (0-1)")
-    context: Optional[str] = Field(default=None, description="Context of the relationship")
-    started_at: Optional[str] = Field(default=None, description="When the relationship started")
-    ended_at: Optional[str] = Field(default=None, description="When the relationship ended")
-    notes: Optional[str] = Field(default=None, description="Notes about the relationship")
-
-
-class DeleteRelationshipInput(BaseModel):
-    from_person_name: str = Field(..., description="Name of the first person")
-    to_person_name: str = Field(..., description="Name of the second person")
-    relationship_type: str = Field(..., description="Type of relationship to delete")
-
-
-class IdentifyFaceInput(BaseModel):
+class HandleFaceInput(BaseModel):
+    action: Literal["identify", "store"] = Field(..., description="Action: 'identify' (detect+match faces) or 'store' (link face to person)")
     image_url: str = Field(..., description="URL path of the uploaded image (e.g. /uploads/chat/uuid.jpg)")
-
-
-class StorePersonFaceInput(BaseModel):
-    person_id: str = Field(..., description="UUID of the person to link the face to")
-    image_url: str = Field(..., description="URL path of the uploaded chat image (e.g. /uploads/chat/uuid.jpg)")
+    person_id: Optional[str] = Field(default=None, description="UUID of the person to link face to (required for 'store' action)")

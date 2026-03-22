@@ -1,7 +1,7 @@
 """
 LangChain tool factory for the Person sub-agent.
 
-Creates 12 person tools with user_id baked in via closures.
+Creates 8 person tools with user_id baked in via closures.
 Each tool has improved descriptions and output schema annotations.
 """
 
@@ -23,7 +23,6 @@ from mcp_server.tools import (
     delete_person_tool,
     search_person_tool,
     add_relationship_tool,
-    get_relationships_tool,
     update_relationship_tool,
     delete_relationship_tool,
     identify_face_from_url_tool,
@@ -37,17 +36,13 @@ from agents.person_agent.schemas import (
     ListPersonsInput,
     DeletePersonInput,
     SearchPersonInput,
-    AddRelationshipInput,
-    GetRelationshipsInput,
-    UpdateRelationshipInput,
-    DeleteRelationshipInput,
-    IdentifyFaceInput,
-    StorePersonFaceInput,
+    ManageRelationshipInput,
+    HandleFaceInput,
 )
 
 
 def make_person_tools(user_id: str):
-    """Return 12 LangChain tools bound to the given user_id via closures."""
+    """Return 8 LangChain tools bound to the given user_id via closures."""
 
     @tool(args_schema=CreatePersonInput)
     async def create_person(
@@ -68,7 +63,7 @@ def make_person_tools(user_id: str):
 
     @tool(args_schema=GetPersonInput)
     async def get_person(person_id: str) -> dict:
-        """Fetch the complete profile of a person by their UUID. Use this to verify data before updating or to retrieve full details after a search. Returns: {success, person: {id, name, occupation, company, tags, ...}}"""
+        """Fetch the complete profile of a person by their UUID, including all their relationships. Use this to verify data before updating or to retrieve full details after a search. Returns: {success, person: {id, name, occupation, company, tags, ...}, relationships: [...], relationship_count: N}"""
         return await get_person_tool(user_id, person_id)
 
     @tool(args_schema=ListPersonsInput)
@@ -94,55 +89,55 @@ def make_person_tools(user_id: str):
         """Semantic search for people by name, description, or any attribute. Uses vector embeddings with fallback to exact name match. Always call this before create_person to check for duplicates. Returns: {success, count, search_type: 'semantic'|'exact', persons: [{id, name, similarity_score, ...}]}"""
         return await search_person_tool(user_id, search_term)
 
-    @tool(args_schema=AddRelationshipInput)
-    async def add_relationship(
+    @tool(args_schema=ManageRelationshipInput)
+    async def manage_relationship(
+        action: str,
         from_person_name: str,
         to_person_name: str,
         relationship_type: str,
         notes: Optional[str] = None,
-        strength: Optional[float] = None,
-        context: Optional[str] = None,
-    ) -> dict:
-        """Create a directed relationship between two EXISTING people. Both must already exist in the graph. Types: KNOWS, FRIEND, FAMILY, COLLEAGUE, WORKS_WITH, MANAGES, REPORTS_TO, MENTOR, PARTNER, NEIGHBOR, CLASSMATE, EMPLOYS, MARRIED_TO, PARENT_OF, INTRODUCED_BY, RIVAL_OF, FORMERLY_WORKED_WITH. Prefer using create_person/update_person with relationship args when one person is being created/updated. Returns: {success, message, relationship: {from, to, type}}"""
-        return await add_relationship_tool(user_id, from_person_name=from_person_name, to_person_name=to_person_name, relationship_type=relationship_type, notes=notes, strength=strength, context=context)
-
-    @tool(args_schema=GetRelationshipsInput)
-    async def get_relationships(person_name: str) -> dict:
-        """Get all relationships for a person by name. Shows who they are connected to and how (friend, colleague, manages, etc.). Returns: {success, person, count, relationships: [{from, to, type, strength, notes}]}"""
-        return await get_relationships_tool(user_id, person_name)
-
-    @tool(args_schema=UpdateRelationshipInput)
-    async def update_relationship(
-        from_person_name: str,
-        to_person_name: str,
-        relationship_type: str,
         strength: Optional[float] = None,
         context: Optional[str] = None,
         started_at: Optional[str] = None,
         ended_at: Optional[str] = None,
-        notes: Optional[str] = None,
     ) -> dict:
-        """Update properties on an existing relationship edge. The relationship must already exist between the two named people. Returns: {success, message, relationship: {...}}"""
-        return await update_relationship_tool(user_id, from_person_name=from_person_name, to_person_name=to_person_name, relationship_type=relationship_type, strength=strength, context=context, started_at=started_at, ended_at=ended_at, notes=notes)
+        """Manage relationships between two existing people. Actions: 'add' (create new relationship), 'update' (modify properties like strength, context, dates, notes), 'delete' (remove relationship). Prefer create_person/update_person with relationship args when one person is being created/updated. Types: KNOWS, FRIEND, FAMILY, COLLEAGUE, WORKS_WITH, MANAGES, REPORTS_TO, MENTOR, PARTNER, NEIGHBOR, CLASSMATE, EMPLOYS, MARRIED_TO, PARENT_OF, INTRODUCED_BY, RIVAL_OF, FORMERLY_WORKED_WITH. Returns: {success, message, relationship?: {...}}"""
+        if action == "add":
+            return await add_relationship_tool(
+                user_id, from_person_name=from_person_name,
+                to_person_name=to_person_name, relationship_type=relationship_type,
+                notes=notes, strength=strength, context=context,
+            )
+        elif action == "update":
+            return await update_relationship_tool(
+                user_id, from_person_name=from_person_name,
+                to_person_name=to_person_name, relationship_type=relationship_type,
+                strength=strength, context=context,
+                started_at=started_at, ended_at=ended_at, notes=notes,
+            )
+        elif action == "delete":
+            return await delete_relationship_tool(
+                user_id, from_person_name=from_person_name,
+                to_person_name=to_person_name, relationship_type=relationship_type,
+            )
+        else:
+            return {"success": False, "message": f"Invalid action '{action}'. Must be 'add', 'update', or 'delete'."}
 
-    @tool(args_schema=DeleteRelationshipInput)
-    async def delete_relationship(
-        from_person_name: str,
-        to_person_name: str,
-        relationship_type: str,
+    @tool(args_schema=HandleFaceInput)
+    async def handle_face(
+        action: str,
+        image_url: str,
+        person_id: Optional[str] = None,
     ) -> dict:
-        """Remove a specific relationship between two people. Requires exact names and relationship type. Returns: {success, message}"""
-        return await delete_relationship_tool(user_id, from_person_name=from_person_name, to_person_name=to_person_name, relationship_type=relationship_type)
-
-    @tool(args_schema=IdentifyFaceInput)
-    async def identify_face(image_url: str) -> dict:
-        """Detect and identify all faces in an uploaded image. For each face found, returns bounding box, detection confidence, and matched persons with similarity scores. Use when user asks 'Who is this?' or sends a photo. Returns: {success, faces_detected, faces: [{face_index, bbox, det_score, match_status, matches: [{name, id, confidence_score}]}]}"""
-        return await identify_face_from_url_tool(user_id, image_url)
-
-    @tool(args_schema=StorePersonFaceInput)
-    async def store_person_face(person_id: str, image_url: str) -> dict:
-        """Link a face photo to a known person by extracting and storing their face embedding. Use when user says 'This is [Name]' with a photo. The person must already exist. Returns: {success, message, face_image_url}"""
-        return await store_person_face_tool(user_id, person_id, image_url)
+        """Handle face operations on uploaded images. Actions: 'identify' (detect and identify all faces — use when user asks 'Who is this?' or sends a photo), 'store' (link a face photo to a known person by person_id — use when user says 'This is [Name]' with a photo). Returns: For identify: {success, faces_detected, faces: [{face_index, bbox, det_score, match_status, matches}]}. For store: {success, message, face_image_url}"""
+        if action == "identify":
+            return await identify_face_from_url_tool(user_id, image_url)
+        elif action == "store":
+            if not person_id:
+                return {"success": False, "message": "person_id is required for 'store' action. Search for the person first."}
+            return await store_person_face_tool(user_id, person_id, image_url)
+        else:
+            return {"success": False, "message": f"Invalid action '{action}'. Must be 'identify' or 'store'."}
 
     return [
         create_person,
@@ -151,10 +146,6 @@ def make_person_tools(user_id: str):
         update_person,
         delete_person,
         search_person,
-        add_relationship,
-        get_relationships,
-        update_relationship,
-        delete_relationship,
-        identify_face,
-        store_person_face,
+        manage_relationship,
+        handle_face,
     ]

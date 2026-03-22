@@ -151,6 +151,8 @@ class CreatePersonOutput(ToolResponse):
 class GetPersonOutput(ToolResponse):
     """Response from get_person tool."""
     person: Optional[PersonData] = Field(default=None, description="The requested person entity")
+    relationships: Optional[List[RelationshipData]] = Field(default=None, description="All relationships of this person")
+    relationship_count: Optional[int] = Field(default=None, description="Number of relationships")
 
 
 class ListPersonsOutput(ToolResponse):
@@ -219,6 +221,18 @@ class IdentifyFaceOutput(ToolResponse):
 class StorePersonFaceOutput(ToolResponse):
     """Response from store_person_face tool."""
     face_image_url: Optional[str] = Field(default=None, description="URL path to the stored face image")
+
+
+class ManageRelationshipOutput(ToolResponse):
+    """Response from manage_relationship tool (add/update/delete)."""
+    relationship: Optional[RelationshipData] = Field(default=None, description="The relationship (for add/update actions)")
+
+
+class HandleFaceOutput(ToolResponse):
+    """Response from handle_face tool (identify/store)."""
+    faces_detected: Optional[int] = Field(default=None, description="Number of faces detected (identify action)")
+    faces: Optional[List[FaceMatchData]] = Field(default=None, description="Per-face results (identify action)")
+    face_image_url: Optional[str] = Field(default=None, description="Stored face URL (store action)")
 
 
 # =====================================================================

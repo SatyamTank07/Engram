@@ -19,15 +19,11 @@ DEFAULT_TOOLS = [
     {"name": "create_person", "description": "Create a new person. Include all extractable fields. Optionally include relationship_with, relationship_type, and relationship_direction to create a relationship in the same call."},
     {"name": "search_person", "description": "Semantic search by name/description. Always search before creating."},
     {"name": "list_persons", "description": "List all persons. Supports pagination and filters (tags, location, occupation, company, interaction_frequency)."},
-    {"name": "get_person", "description": "Fetch full details by ID."},
+    {"name": "get_person", "description": "Fetch full details by ID, including all relationships."},
     {"name": "update_person", "description": "Modify person fields. Optionally include relationship_with, relationship_type, and relationship_direction to add a relationship in the same call."},
     {"name": "delete_person", "description": "Remove a person (only if user explicitly asks)."},
-    {"name": "add_relationship", "description": "Create a relationship between two existing people. Use ONLY when both persons already exist and no create/update is needed."},
-    {"name": "get_relationships", "description": "See all connections for a person."},
-    {"name": "update_relationship", "description": "Update relationship properties (strength, context, dates, notes)."},
-    {"name": "delete_relationship", "description": "Remove a relationship between two people."},
-    {"name": "identify_face", "description": "Detect and identify faces in an uploaded image."},
-    {"name": "store_person_face", "description": "Link a face photo to a person."},
+    {"name": "manage_relationship", "description": "Add, update, or delete relationships between two existing people. Use action='add'|'update'|'delete'. Prefer create_person/update_person with relationship args when one person is being created/updated."},
+    {"name": "handle_face", "description": "Face operations: action='identify' to detect+match faces in a photo, action='store' to link a face photo to a known person."},
 ]
 
 
