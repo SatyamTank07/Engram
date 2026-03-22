@@ -1,8 +1,7 @@
 """
 Agent network — in-process dispatch to sub-agents.
 
-Instead of making HTTP calls to separate A2A containers, this module
-runs each sub-agent's LangChain tool-loop directly in the same process.
+Runs each sub-agent's LangChain tool-loop directly in the same process.
 """
 
 import json

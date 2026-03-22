@@ -1,18 +1,11 @@
 """
-Shared configuration for all A2A sub-agents.
+Shared configuration for all sub-agents.
 """
 
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
-
-# --- Agent ports ---
-ORCHESTRATOR_PORT = int(os.getenv("ORCHESTRATOR_PORT", "5000"))
-PERSON_AGENT_PORT = int(os.getenv("PERSON_AGENT_PORT", "5001"))
-IDEA_AGENT_PORT = int(os.getenv("IDEA_AGENT_PORT", "5002"))
-CONTENT_AGENT_PORT = int(os.getenv("CONTENT_AGENT_PORT", "5003"))
-PROJECT_AGENT_PORT = int(os.getenv("PROJECT_AGENT_PORT", "5004"))
 
 # --- LLM ---
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
@@ -30,4 +23,3 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "engram_graph")
 # --- Agent tool iteration limit ---
 MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "15"))
 MAX_HISTORY_PAIRS = int(os.getenv("MAX_HISTORY_PAIRS", "10"))
-
