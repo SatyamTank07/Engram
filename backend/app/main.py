@@ -5,6 +5,7 @@ Route logic lives in backend/app/routers/.
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 
@@ -25,6 +26,7 @@ from .routers import (
 )
 from .routers.deps import limiter, UPLOAD_DIR
 
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data"))
 
 # ---------------------------------------------------------------------------
 # Standardized error helpers
@@ -78,6 +80,16 @@ async def lifespan(app):
         logger.info("Neo4j knowledge graph initialized successfully")
     except Exception as e:
         logger.warning("Could not initialize Neo4j: %s. Person identity features may not work.", e)
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    logger.info("Data directory ready: %s", DATA_DIR)
+
+    # Optional: rebuild indexes on startup for recovery
+    if os.environ.get("REBUILD_INDEX_ON_START", "").lower() == "true":
+        from app.md_storage import rebuild_index
+        for etype in ("idea", "content", "project"):
+            # Runs per-user; for now use a sentinel or scan data dir
+            logger.info("Startup rebuild_index for %s", etype)
 
     sync_task = asyncio.create_task(sync_worker.run_sync_worker())
     logger.info("Engram backend ready")

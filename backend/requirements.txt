@@ -25,6 +25,8 @@ opencv-python-headless
 slowapi>=0.1.9
 aiofiles>=24.1.0
 sse-starlette>=1.6.0
+python-frontmatter
+pageindex
 
 # Testing
 pytest>=8.0
