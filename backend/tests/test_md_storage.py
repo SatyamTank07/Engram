@@ -21,8 +21,10 @@ from app.md_storage import (
     _write_md_file, _parse_md_file,
     _load_index, _save_index,
     _split_body, _merge_body_into_dict,
+    _load_tree,
+    _rebuild_collection, _rebuild_tree, _build_fallback_tree,
     create_entity, get_entity, list_entities, update_entity, delete_entity,
-    rebuild_index,
+    rebuild_index, search_entities,
     DATA_DIR,
 )
 
@@ -742,3 +744,219 @@ class TestRebuildIndex:
         """Rebuild on an empty directory returns an empty index."""
         new_index = await md_storage.rebuild_index(user_id, "idea")
         assert new_index == {}
+
+
+# ---------------------------------------------------------------------------
+# _rebuild_collection_and_tree / tree generation tests
+# ---------------------------------------------------------------------------
+class TestRebuildCollectionAndTree:
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_rebuild_collection_and_tree(self, mock_rebuild, user_id, sample_idea_data):
+        """Create entities, run rebuild manually, verify tree file exists."""
+        await md_storage.create_entity(user_id, "idea", sample_idea_data)
+        await md_storage.create_entity(user_id, "idea", {"name": "Second Idea", "tags": ["test"]})
+
+        # Run the collection + tree rebuild directly (bypass debounce)
+        await _rebuild_collection(user_id, "idea")
+        await _rebuild_tree(user_id, "idea")
+
+        entity_dir = md_storage._get_entity_dir(user_id, "idea")
+        collection_path = entity_dir / "_collection.md"
+        tree_path = entity_dir / "_tree.json"
+
+        assert collection_path.exists()
+        assert tree_path.exists()
+
+        # Tree should be valid JSON
+        tree = json.loads(tree_path.read_text(encoding="utf-8"))
+        assert "structure" in tree
+        assert "doc_name" in tree
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_rebuild_collection_content(self, mock_rebuild, user_id, sample_idea_data):
+        """Collection file should contain entity names."""
+        await md_storage.create_entity(user_id, "idea", sample_idea_data)
+
+        await _rebuild_collection(user_id, "idea")
+
+        entity_dir = md_storage._get_entity_dir(user_id, "idea")
+        collection_path = entity_dir / "_collection.md"
+        content = collection_path.read_text(encoding="utf-8")
+
+        assert "My Startup Idea" in content
+        assert "# Ideas" in content
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_fallback_tree_structure(self, mock_rebuild, user_id, sample_idea_data):
+        """Fallback tree groups by status -> subtype."""
+        await md_storage.create_entity(user_id, "idea", sample_idea_data)
+        await md_storage.create_entity(
+            user_id, "idea",
+            {"name": "Archived Idea", "status": "archived", "idea_type": "experiment"},
+        )
+
+        tree = _build_fallback_tree(user_id, "idea")
+        assert tree["doc_name"] == f"{user_id}-idea"
+        assert len(tree["structure"]) >= 1  # at least one status group
+
+        # Flatten all titles to check entity presence
+        all_titles = []
+        for status_node in tree["structure"]:
+            for subtype_node in status_node.get("children", []):
+                for entity_node in subtype_node.get("children", []):
+                    all_titles.append(entity_node["title"])
+        assert any("My Startup Idea" in t for t in all_titles)
+        assert any("Archived Idea" in t for t in all_titles)
+
+
+# ---------------------------------------------------------------------------
+# _load_tree tests
+# ---------------------------------------------------------------------------
+class TestLoadTree:
+    def test_load_tree_missing(self, user_id):
+        """Returns None when no tree file exists."""
+        result = _load_tree(user_id, "idea")
+        assert result is None
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_load_tree_after_rebuild(self, mock_rebuild, user_id, sample_idea_data):
+        """After rebuild, _load_tree should return the tree dict."""
+        await md_storage.create_entity(user_id, "idea", sample_idea_data)
+        await _rebuild_collection(user_id, "idea")
+        await _rebuild_tree(user_id, "idea")
+
+        tree = _load_tree(user_id, "idea")
+        assert tree is not None
+        assert "structure" in tree
+
+    def test_load_tree_corrupt_json(self, user_id):
+        """Returns None for corrupt JSON files."""
+        entity_dir = md_storage._get_entity_dir(user_id, "idea")
+        tree_path = entity_dir / "_tree.json"
+        tree_path.write_text("not valid json {{", encoding="utf-8")
+        result = _load_tree(user_id, "idea")
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# search_entities tests
+# ---------------------------------------------------------------------------
+class TestSearchEntities:
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_search_entities_basic(self, mock_rebuild, user_id):
+        """Search finds entities matching by display name."""
+        await md_storage.create_entity(user_id, "idea", {"name": "Machine Learning Pipeline"})
+        await md_storage.create_entity(user_id, "idea", {"name": "Web App Design"})
+        await md_storage.create_entity(user_id, "idea", {"name": "ML Model Training"})
+
+        results = await search_entities(user_id, "idea", "machine learning")
+        assert len(results) >= 1
+        names = [r["name"] for r in results]
+        assert "Machine Learning Pipeline" in names
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_search_entities_empty(self, mock_rebuild, user_id):
+        """Search on empty collection returns []."""
+        results = await search_entities(user_id, "idea", "anything")
+        assert results == []
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_search_entities_by_tags(self, mock_rebuild, user_id):
+        """Search matches tag content."""
+        await md_storage.create_entity(
+            user_id, "idea",
+            {"name": "Unnamed Project", "tags": ["blockchain", "defi"]},
+        )
+        await md_storage.create_entity(
+            user_id, "idea",
+            {"name": "Another Thing", "tags": ["cooking"]},
+        )
+
+        results = await search_entities(user_id, "idea", "blockchain")
+        assert len(results) >= 1
+        assert results[0]["name"] == "Unnamed Project"
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_search_entities_no_match(self, mock_rebuild, user_id):
+        """Search with non-matching query returns []."""
+        await md_storage.create_entity(user_id, "idea", {"name": "Alpha"})
+        results = await search_entities(user_id, "idea", "zzzznotfound")
+        assert results == []
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_search_entities_respects_limit(self, mock_rebuild, user_id):
+        """Search returns at most `limit` results."""
+        for i in range(10):
+            await md_storage.create_entity(
+                user_id, "idea", {"name": f"AI Project {i}", "tags": ["ai"]},
+            )
+
+        results = await search_entities(user_id, "idea", "ai", limit=3)
+        assert len(results) == 3
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_search_entities_by_status(self, mock_rebuild, user_id):
+        """Search can match on status field."""
+        await md_storage.create_entity(
+            user_id, "idea", {"name": "Done Thing", "status": "archived"},
+        )
+        await md_storage.create_entity(
+            user_id, "idea", {"name": "Active Thing", "status": "active"},
+        )
+
+        results = await search_entities(user_id, "idea", "archived")
+        assert len(results) >= 1
+        assert results[0]["name"] == "Done Thing"
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_search_entities_by_subtype(self, mock_rebuild, user_id):
+        """Search can match on subtype field."""
+        await md_storage.create_entity(
+            user_id, "idea",
+            {"name": "Hyp Idea", "idea_type": "hypothesis"},
+        )
+        await md_storage.create_entity(
+            user_id, "idea",
+            {"name": "Exp Idea", "idea_type": "experiment"},
+        )
+
+        results = await search_entities(user_id, "idea", "hypothesis")
+        assert len(results) >= 1
+        assert results[0]["name"] == "Hyp Idea"
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_search_entities_ranking(self, mock_rebuild, user_id):
+        """Entity matching on name should rank higher than tag-only match."""
+        await md_storage.create_entity(
+            user_id, "idea",
+            {"name": "Blockchain Platform", "tags": ["crypto"]},
+        )
+        await md_storage.create_entity(
+            user_id, "idea",
+            {"name": "Cooking App", "tags": ["blockchain"]},
+        )
+
+        results = await search_entities(user_id, "idea", "blockchain")
+        assert len(results) == 2
+        # Name match (3.0) should outrank tag match (2.0)
+        assert results[0]["name"] == "Blockchain Platform"
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_search_empty_query(self, mock_rebuild, user_id):
+        """Empty query returns []."""
+        await md_storage.create_entity(user_id, "idea", {"name": "Something"})
+        results = await search_entities(user_id, "idea", "")
+        assert results == []

@@ -255,11 +255,249 @@ def _build_index_entry(entity_type: str, data: dict, filename: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Stub for tree rebuild (Task 3 will implement the real version)
+# Collection + Tree generation (PageIndex integration)
 # ---------------------------------------------------------------------------
+_TYPE_TITLES: dict[str, str] = {
+    "idea": "Ideas",
+    "content": "Content",
+    "project": "Projects",
+}
+
+
+async def _rebuild_collection(user_id: str, entity_type: str) -> Path:
+    """Regenerate ``_collection.md`` from all entity .md files.
+
+    The collection file is a single Markdown document with ``## Entity Name``
+    sections — suitable for PageIndex tree generation.
+    """
+    entity_dir = _get_entity_dir(user_id, entity_type)
+    index = _load_index(user_id, entity_type)
+    display_field = _DISPLAY_FIELD.get(entity_type, "name")
+    type_title = _TYPE_TITLES.get(entity_type, entity_type.title())
+
+    lines: list[str] = [f"# {type_title}\n"]
+    for entity_id, entry in index.items():
+        entity = await get_entity(user_id, entity_type, entity_id)
+        if not entity:
+            continue
+        display_name = entity.get(display_field, "untitled")
+        lines.append(f"\n## {display_name} ({entity_id[:8]})")
+        # Metadata line
+        subtype = entity.get(_SUBTYPE_FIELD.get(entity_type, ""), "")
+        status = entity.get("status", "")
+        tags = ", ".join(entity.get("tags", []))
+        meta_line = f"- **Type:** {subtype} | **Status:** {status} | **Tags:** {tags}"
+        if entity_type == "idea" and entity.get("confidence"):
+            meta_line += f" | **Confidence:** {entity['confidence']}"
+        elif entity_type == "content" and entity.get("your_rating"):
+            meta_line += f" | **Rating:** {entity['your_rating']}"
+        elif entity_type == "project" and entity.get("priority"):
+            meta_line += f" | **Priority:** {entity['priority']}"
+        lines.append(meta_line)
+        # Body sections
+        for bf in _BODY_FIELDS.get(entity_type, []):
+            val = entity.get(bf, "")
+            if val:
+                heading = bf.replace("_", " ").title()
+                lines.append(f"\n### {heading}\n{val}")
+
+    collection_path = entity_dir / "_collection.md"
+    collection_path.write_text("\n".join(lines), encoding="utf-8")
+    return collection_path
+
+
+async def _rebuild_tree(user_id: str, entity_type: str) -> None:
+    """Rebuild PageIndex tree from ``_collection.md``.
+
+    Falls back to a simple hierarchical grouping (status -> subtype -> entities)
+    when PageIndex or the required LLM is unavailable.
+    """
+    entity_dir = _get_entity_dir(user_id, entity_type)
+    collection_path = entity_dir / "_collection.md"
+    if not collection_path.exists():
+        return
+
+    # Try PageIndex first
+    try:
+        from pageindex.page_index_md import md_to_tree  # type: ignore[import-untyped]
+
+        tree = await md_to_tree(
+            md_path=str(collection_path),
+            model=os.environ.get("PAGEINDEX_MODEL", "gpt-4o-2024-11-20"),
+            if_add_node_summary="yes",
+            if_add_node_id="yes",
+            if_add_node_text="no",
+        )
+        tree_path = entity_dir / "_tree.json"
+        tree_path.write_text(
+            json.dumps(tree, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        logger.info("PageIndex tree generated for %s/%s", user_id, entity_type)
+        return
+    except Exception as exc:
+        logger.info(
+            "PageIndex tree generation unavailable for %s/%s, using fallback: %s",
+            user_id,
+            entity_type,
+            exc,
+        )
+
+    # Fallback: build a simple hierarchical tree from the index
+    tree = _build_fallback_tree(user_id, entity_type)
+    tree_path = entity_dir / "_tree.json"
+    tree_path.write_text(
+        json.dumps(tree, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    logger.debug("Fallback tree generated for %s/%s", user_id, entity_type)
+
+
+def _build_fallback_tree(user_id: str, entity_type: str) -> dict:
+    """Build a hierarchical tree grouped by status -> subtype -> entities.
+
+    Returns a dict with the same top-level shape as PageIndex output so that
+    downstream consumers can treat them uniformly.
+    """
+    index = _load_index(user_id, entity_type)
+    display_field = _DISPLAY_FIELD.get(entity_type, "name")
+    subtype_field = _SUBTYPE_FIELD.get(entity_type, "")
+
+    # Group: status -> subtype -> list of entity summaries
+    groups: dict[str, dict[str, list[dict]]] = {}
+    for entity_id, entry in index.items():
+        status = entry.get("status", "unknown")
+        subtype = entry.get(subtype_field, "general") if subtype_field else "general"
+        groups.setdefault(status, {}).setdefault(subtype, []).append(
+            {
+                "entity_id": entity_id,
+                "title": entry.get(display_field, "untitled"),
+                "tags": entry.get("tags", []),
+            }
+        )
+
+    # Convert to tree structure
+    type_title = _TYPE_TITLES.get(entity_type, entity_type.title())
+    structure: list[dict] = []
+    for status, subtypes in sorted(groups.items()):
+        status_node: dict[str, Any] = {
+            "title": f"Status: {status}",
+            "children": [],
+        }
+        for subtype, entities in sorted(subtypes.items()):
+            subtype_node: dict[str, Any] = {
+                "title": f"Type: {subtype}",
+                "children": [
+                    {
+                        "title": f"{e['title']} ({e['entity_id'][:8]})",
+                        "entity_id": e["entity_id"],
+                        "tags": e["tags"],
+                    }
+                    for e in entities
+                ],
+            }
+            status_node["children"].append(subtype_node)
+        structure.append(status_node)
+
+    return {
+        "doc_name": f"{user_id}-{entity_type}",
+        "doc_description": f"Hierarchical index of {type_title} for user {user_id}",
+        "structure": structure,
+    }
+
+
+_rebuild_timers: dict[tuple[str, str], asyncio.Task] = {}  # type: ignore[type-arg]
+
+
 async def _rebuild_collection_and_tree(user_id: str, entity_type: str) -> None:
-    """Stub — Task 3 will replace this with PageIndex tree generation."""
-    logger.debug("_rebuild_collection_and_tree called for %s/%s (stub)", user_id, entity_type)
+    """Debounced rebuild — waits 2 s to batch rapid CRUD ops, then rebuilds."""
+    key = (user_id, entity_type)
+    # Cancel any pending rebuild for this (user, type)
+    if key in _rebuild_timers and not _rebuild_timers[key].done():
+        _rebuild_timers[key].cancel()
+
+    async def _do_rebuild() -> None:
+        await asyncio.sleep(2)  # debounce delay
+        await _rebuild_collection(user_id, entity_type)
+        await _rebuild_tree(user_id, entity_type)
+
+    _rebuild_timers[key] = asyncio.create_task(_do_rebuild())
+
+
+# ---------------------------------------------------------------------------
+# Tree loading
+# ---------------------------------------------------------------------------
+def _load_tree(user_id: str, entity_type: str) -> dict | None:
+    """Load the PageIndex tree from ``_tree.json``. Returns *None* when absent."""
+    tree_path = _get_entity_dir(user_id, entity_type) / "_tree.json"
+    if not tree_path.exists():
+        return None
+    try:
+        return json.loads(tree_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load tree for %s/%s: %s", user_id, entity_type, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+async def search_entities(
+    user_id: str,
+    entity_type: str,
+    query: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Search entities using keyword scoring against the index.
+
+    Scores each entity by matching *query* terms against the display field,
+    tags, status, and subtype.  Returns the top *limit* results as full
+    entity dicts, sorted by descending relevance score.
+    """
+    index = _load_index(user_id, entity_type)
+    if not index:
+        return []
+
+    display_field = _DISPLAY_FIELD.get(entity_type, "name")
+    subtype_field = _SUBTYPE_FIELD.get(entity_type, "")
+    query_terms = [t for t in query.lower().split() if t]
+    if not query_terms:
+        return []
+
+    scored: list[tuple[float, str]] = []
+    for entity_id, entry in index.items():
+        score = 0.0
+        # Display field (highest weight)
+        display_val = entry.get(display_field, "").lower()
+        for term in query_terms:
+            if term in display_val:
+                score += 3.0
+        # Tags
+        tag_str = " ".join(entry.get("tags", [])).lower()
+        for term in query_terms:
+            if term in tag_str:
+                score += 2.0
+        # Status
+        status_val = entry.get("status", "").lower()
+        for term in query_terms:
+            if term in status_val:
+                score += 1.0
+        # Subtype
+        if subtype_field:
+            subtype_val = entry.get(subtype_field, "").lower()
+            for term in query_terms:
+                if term in subtype_val:
+                    score += 1.5
+        if score > 0:
+            scored.append((score, entity_id))
+
+    # Sort by score descending
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    results: list[dict] = []
+    for _score, eid in scored[:limit]:
+        entity = await get_entity(user_id, entity_type, eid)
+        if entity:
+            results.append(entity)
+    return results
 
 
 # ---------------------------------------------------------------------------
