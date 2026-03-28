@@ -9,7 +9,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Request, Response
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -197,6 +197,21 @@ async def pending_sync_stats(
     """Return counts of pending/failed embedding sync operations."""
     stats = await run_in_threadpool(vector_db.get_pending_sync_stats)
     return stats
+
+
+@app.post("/api/v1/admin/rebuild-index")
+async def admin_rebuild_index(
+    entity_type: str = Query(..., description="Entity type: idea, content, or project"),
+    current_user: database.User = Depends(auth.get_current_user),
+):
+    """Rebuild the _index.json for a given entity type from .md files on disk."""
+    from .md_storage import rebuild_index
+
+    if entity_type not in ("idea", "content", "project"):
+        raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": f"Invalid entity_type: {entity_type}"})
+
+    new_index = await rebuild_index(str(current_user.id), entity_type)
+    return {"status": "ok", "entity_type": entity_type, "total": len(new_index)}
 
 
 # ---------------------------------------------------------------------------
