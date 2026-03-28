@@ -19,7 +19,10 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+import json
+
 # Import tool functions (each now requires user_id as first arg)
+from mcp_server import tools
 from mcp_server.tools import (
     create_person_tool,
     get_person_tool,
@@ -31,30 +34,6 @@ from mcp_server.tools import (
     get_relationships_tool,
     update_relationship_tool,
     delete_relationship_tool,
-    # Idea tools
-    create_idea_tool,
-    get_idea_tool,
-    list_ideas_tool,
-    update_idea_tool,
-    delete_idea_tool,
-    search_ideas_tool,
-    # Content tools
-    create_content_tool,
-    get_content_tool,
-    list_content_tool,
-    update_content_tool,
-    delete_content_tool,
-    search_content_tool,
-    # Project tools
-    create_project_tool,
-    get_project_tool,
-    list_projects_tool,
-    update_project_tool,
-    delete_project_tool,
-    search_projects_tool,
-    # Cross-entity tools
-    link_entities_tool,
-    get_entity_graph_tool,
 )
 
 # Initialize FastMCP server
@@ -224,233 +203,96 @@ def delete_relationship(
 
 
 # =====================================================================
-# Idea MCP tools
+# Generic Entity MCP tools (idea, content, project) — backed by md_storage
 # =====================================================================
 
 @mcp.tool()
-def create_idea(
-    user_id: str, name: str,
-    idea_type: str | None = None, description: str | None = None,
-    confidence: float | None = None, status: str | None = None,
-    evidence_for: list[str] | None = None, evidence_against: list[str] | None = None,
-    date_formed: str | None = None, revisit_date: str | None = None,
-    tags: list[str] | None = None, notes: str | None = None,
-) -> dict:
-    """Create a new idea in the knowledge graph."""
-    kwargs = {}
-    for field in ("idea_type", "description", "confidence", "status", "evidence_for",
-                  "evidence_against", "date_formed", "revisit_date", "tags", "notes"):
-        val = locals()[field]
-        if val is not None:
-            kwargs[field] = val
-    return create_idea_tool(user_id, name, **kwargs)
+async def create_entity(user_id: str, entity_type: str, data: dict) -> str:
+    """Create a new entity.
+
+    Args:
+        user_id: The user's ID
+        entity_type: Type of entity - "idea", "content", or "project"
+        data: Entity data dict with type-specific fields.
+              For ideas: name, idea_type, description, confidence, status, evidence_for, evidence_against, tags, notes
+              For content: title, content_type, author, source_url, status, your_rating, personal_notes, tags
+              For projects: name, project_type, status, description, goal, target_date, priority, tags, notes
+    """
+    result = await tools.create_entity(user_id, entity_type, data)
+    return json.dumps(result, default=str)
 
 
 @mcp.tool()
-def get_idea(user_id: str, idea_id: str) -> dict:
-    """Get details of a specific idea by ID."""
-    return get_idea_tool(user_id, idea_id)
+async def get_entity(user_id: str, entity_type: str, entity_id: str) -> str:
+    """Get an entity by its ID.
+
+    Args:
+        user_id: The user's ID
+        entity_type: Type of entity - "idea", "content", or "project"
+        entity_id: The unique identifier of the entity
+    """
+    result = await tools.get_entity(user_id, entity_type, entity_id)
+    return json.dumps(result, default=str)
 
 
 @mcp.tool()
-def list_ideas(
-    user_id: str, limit: int | None = 50, offset: int | None = 0,
-    idea_type: str | None = None, status: str | None = None,
-    tags: list[str] | None = None,
-) -> dict:
-    """List ideas for a user."""
-    return list_ideas_tool(user_id, limit, offset, idea_type, status, tags)
+async def list_entities(
+    user_id: str, entity_type: str,
+    limit: int = 50, offset: int = 0,
+    filters: dict | None = None,
+) -> str:
+    """List entities with optional filtering and pagination.
+
+    Args:
+        user_id: The user's ID
+        entity_type: Type of entity - "idea", "content", or "project"
+        limit: Maximum number of results to return (default 50)
+        offset: Number of results to skip for pagination (default 0)
+        filters: Optional dict of filter criteria (e.g. {"status": "active", "tags": ["ai"]})
+    """
+    result = await tools.list_entities(user_id, entity_type, limit, offset, filters)
+    return json.dumps(result, default=str)
 
 
 @mcp.tool()
-def update_idea(
-    user_id: str, idea_id: str,
-    name: str | None = None, idea_type: str | None = None,
-    description: str | None = None, confidence: float | None = None,
-    status: str | None = None, evidence_for: list[str] | None = None,
-    evidence_against: list[str] | None = None, date_formed: str | None = None,
-    revisit_date: str | None = None, tags: list[str] | None = None,
-    notes: str | None = None,
-) -> dict:
-    """Update an existing idea."""
-    kwargs = {}
-    for field in ("name", "idea_type", "description", "confidence", "status",
-                  "evidence_for", "evidence_against", "date_formed", "revisit_date", "tags", "notes"):
-        val = locals()[field]
-        if val is not None:
-            kwargs[field] = val
-    return update_idea_tool(user_id, idea_id, **kwargs)
+async def update_entity(user_id: str, entity_type: str, entity_id: str, updates: dict) -> str:
+    """Update an existing entity.
+
+    Args:
+        user_id: The user's ID
+        entity_type: Type of entity - "idea", "content", or "project"
+        entity_id: The unique identifier of the entity to update
+        updates: Dict of fields to update (only provided fields are changed)
+    """
+    result = await tools.update_entity(user_id, entity_type, entity_id, updates)
+    return json.dumps(result, default=str)
 
 
 @mcp.tool()
-def delete_idea(user_id: str, idea_id: str) -> dict:
-    """Delete an idea."""
-    return delete_idea_tool(user_id, idea_id)
+async def delete_entity(user_id: str, entity_type: str, entity_id: str) -> str:
+    """Delete an entity.
+
+    Args:
+        user_id: The user's ID
+        entity_type: Type of entity - "idea", "content", or "project"
+        entity_id: The unique identifier of the entity to delete
+    """
+    result = await tools.delete_entity(user_id, entity_type, entity_id)
+    return json.dumps(result, default=str)
 
 
 @mcp.tool()
-def search_ideas(user_id: str, search_term: str) -> dict:
-    """Search ideas by name or description."""
-    return search_ideas_tool(user_id, search_term)
+async def search_entities(user_id: str, entity_type: str, query: str, limit: int = 20) -> str:
+    """Search entities by keyword across their content.
 
-
-# =====================================================================
-# Content MCP tools
-# =====================================================================
-
-@mcp.tool()
-def create_content(
-    user_id: str, title: str,
-    content_type: str | None = None, author: str | None = None,
-    source_url: str | None = None, status: str | None = None,
-    your_rating: float | None = None, personal_notes: str | None = None,
-    recommended_by: str | None = None, tags: list[str] | None = None,
-) -> dict:
-    """Create new content in the knowledge graph."""
-    kwargs = {}
-    for field in ("content_type", "author", "source_url", "status",
-                  "your_rating", "personal_notes", "recommended_by", "tags"):
-        val = locals()[field]
-        if val is not None:
-            kwargs[field] = val
-    return create_content_tool(user_id, title, **kwargs)
-
-
-@mcp.tool()
-def get_content(user_id: str, content_id: str) -> dict:
-    """Get details of specific content by ID."""
-    return get_content_tool(user_id, content_id)
-
-
-@mcp.tool()
-def list_content(
-    user_id: str, limit: int | None = 50, offset: int | None = 0,
-    content_type: str | None = None, status: str | None = None,
-    tags: list[str] | None = None,
-) -> dict:
-    """List content for a user."""
-    return list_content_tool(user_id, limit, offset, content_type, status, tags)
-
-
-@mcp.tool()
-def update_content(
-    user_id: str, content_id: str,
-    title: str | None = None, content_type: str | None = None,
-    author: str | None = None, source_url: str | None = None,
-    status: str | None = None, your_rating: float | None = None,
-    personal_notes: str | None = None, recommended_by: str | None = None,
-    tags: list[str] | None = None,
-) -> dict:
-    """Update existing content."""
-    kwargs = {}
-    for field in ("title", "content_type", "author", "source_url", "status",
-                  "your_rating", "personal_notes", "recommended_by", "tags"):
-        val = locals()[field]
-        if val is not None:
-            kwargs[field] = val
-    return update_content_tool(user_id, content_id, **kwargs)
-
-
-@mcp.tool()
-def delete_content(user_id: str, content_id: str) -> dict:
-    """Delete content."""
-    return delete_content_tool(user_id, content_id)
-
-
-@mcp.tool()
-def search_content(user_id: str, search_term: str) -> dict:
-    """Search content by title or description."""
-    return search_content_tool(user_id, search_term)
-
-
-# =====================================================================
-# Project MCP tools
-# =====================================================================
-
-@mcp.tool()
-def create_project(
-    user_id: str, name: str,
-    project_type: str | None = None, status: str | None = None,
-    description: str | None = None, goal: str | None = None,
-    target_date: str | None = None, priority: float | None = None,
-    tags: list[str] | None = None, notes: str | None = None,
-) -> dict:
-    """Create a new project in the knowledge graph."""
-    kwargs = {}
-    for field in ("project_type", "status", "description", "goal",
-                  "target_date", "priority", "tags", "notes"):
-        val = locals()[field]
-        if val is not None:
-            kwargs[field] = val
-    return create_project_tool(user_id, name, **kwargs)
-
-
-@mcp.tool()
-def get_project(user_id: str, project_id: str) -> dict:
-    """Get details of a specific project by ID."""
-    return get_project_tool(user_id, project_id)
-
-
-@mcp.tool()
-def list_projects(
-    user_id: str, limit: int | None = 50, offset: int | None = 0,
-    project_type: str | None = None, status: str | None = None,
-    tags: list[str] | None = None,
-) -> dict:
-    """List projects for a user."""
-    return list_projects_tool(user_id, limit, offset, project_type, status, tags)
-
-
-@mcp.tool()
-def update_project(
-    user_id: str, project_id: str,
-    name: str | None = None, project_type: str | None = None,
-    status: str | None = None, description: str | None = None,
-    goal: str | None = None, target_date: str | None = None,
-    priority: float | None = None, tags: list[str] | None = None,
-    notes: str | None = None,
-) -> dict:
-    """Update an existing project."""
-    kwargs = {}
-    for field in ("name", "project_type", "status", "description", "goal",
-                  "target_date", "priority", "tags", "notes"):
-        val = locals()[field]
-        if val is not None:
-            kwargs[field] = val
-    return update_project_tool(user_id, project_id, **kwargs)
-
-
-@mcp.tool()
-def delete_project(user_id: str, project_id: str) -> dict:
-    """Delete a project."""
-    return delete_project_tool(user_id, project_id)
-
-
-@mcp.tool()
-def search_projects(user_id: str, search_term: str) -> dict:
-    """Search projects by name or description."""
-    return search_projects_tool(user_id, search_term)
-
-
-# =====================================================================
-# Cross-entity MCP tools
-# =====================================================================
-
-@mcp.tool()
-def link_entities(
-    user_id: str,
-    from_type: str, from_id: str,
-    to_type: str, to_id: str,
-    rel_type: str, properties: dict | None = None,
-) -> dict:
-    """Create a cross-entity relationship between any two entities."""
-    return link_entities_tool(user_id, from_type, from_id, to_type, to_id, rel_type, properties)
-
-
-@mcp.tool()
-def get_entity_graph(user_id: str, entity_type: str, entity_id: str) -> dict:
-    """Get all connections of any entity."""
-    return get_entity_graph_tool(user_id, entity_type, entity_id)
+    Args:
+        user_id: The user's ID
+        entity_type: Type of entity - "idea", "content", or "project"
+        query: Search term to match against entity titles, descriptions, and body content
+        limit: Maximum number of results to return (default 20)
+    """
+    result = await tools.search_entities(user_id, entity_type, query, limit)
+    return json.dumps(result, default=str)
 
 
 if __name__ == "__main__":

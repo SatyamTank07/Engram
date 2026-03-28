@@ -1,9 +1,9 @@
 """
-MCP tools for PersonIdentity operations via Neo4j Knowledge Graph.
+MCP tools for Engram knowledge graph operations.
 Each tool takes an explicit user_id — no hardcoded default.
 
-All tool functions are async to natively await the async Neo4j driver
-and avoid event-loop bridging hacks.
+Person/face/relationship tools use the Neo4j graph_db backend.
+Generic entity tools (idea, content, project) use the md_storage backend.
 """
 
 import sys
@@ -16,6 +16,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from backend.app import graph_db, face_service
 from backend.app import embedding_service, vector_db
+from backend.app import md_storage
 
 logger = logging.getLogger(__name__)
 
@@ -576,343 +577,89 @@ async def delete_relationship_tool(
 
 
 # =====================================================================
-# Idea Tools
+# Generic Entity Tools (idea, content, project) — backed by md_storage
 # =====================================================================
 
-async def create_idea_tool(user_id: str, name: str, **kwargs) -> dict:
-    """Create a new idea in the knowledge graph."""
+_VALID_ENTITY_TYPES = ("idea", "content", "project")
+
+
+async def create_entity(user_id: str, entity_type: str, data: dict) -> dict:
+    """Create a new entity (idea, content, or project) via md_storage."""
+    if entity_type not in _VALID_ENTITY_TYPES:
+        return {"error": f"Invalid entity_type: {entity_type}. Must be one of: {', '.join(_VALID_ENTITY_TYPES)}"}
     try:
-        logger.info("[create_idea] user_id=%s, name=%s", user_id, name)
-        idea = await graph_db.create_idea_node(user_id=user_id, name=name, **kwargs)
-        return {"success": True, "message": f"Successfully created idea: {name}", "idea": idea}
+        logger.info("[create_entity] user_id=%s, type=%s", user_id, entity_type)
+        result = await md_storage.create_entity(user_id, entity_type, data)
+        return result
     except Exception as e:
-        logger.exception("[create_idea] failed")
-        return {"success": False, "message": f"Error creating idea: {str(e)}"}
+        logger.exception("[create_entity] failed")
+        return {"error": f"Error creating {entity_type}: {str(e)}"}
 
 
-async def get_idea_tool(user_id: str, idea_id: str) -> dict:
-    """Get details of a specific idea by ID."""
+async def get_entity(user_id: str, entity_type: str, entity_id: str) -> dict:
+    """Get an entity by ID."""
+    if entity_type not in _VALID_ENTITY_TYPES:
+        return {"error": f"Invalid entity_type: {entity_type}. Must be one of: {', '.join(_VALID_ENTITY_TYPES)}"}
     try:
-        idea = await graph_db.get_idea_node(idea_id)
-        if not idea:
-            return {"success": False, "message": f"Idea with ID {idea_id} not found"}
-        if idea.get("user_id") != user_id:
-            return {"success": False, "message": "Access denied"}
-        return {"success": True, "idea": idea}
+        logger.info("[get_entity] user_id=%s, type=%s, id=%s", user_id, entity_type, entity_id)
+        result = await md_storage.get_entity(user_id, entity_type, entity_id)
+        if result is None:
+            return {"error": f"{entity_type} not found: {entity_id}"}
+        return result
     except Exception as e:
-        logger.exception("[get_idea] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
+        logger.exception("[get_entity] failed")
+        return {"error": f"Error retrieving {entity_type}: {str(e)}"}
 
 
-async def list_ideas_tool(
-    user_id: str, limit: int | None = 50, offset: int | None = 0,
-    idea_type: str | None = None, status: str | None = None,
-    tags: list[str] | None = None,
-) -> dict:
-    """List ideas for the current user."""
+async def list_entities(user_id: str, entity_type: str, limit: int = 50, offset: int = 0, filters: dict | None = None) -> dict:
+    """List entities with optional filtering."""
+    if entity_type not in _VALID_ENTITY_TYPES:
+        return {"error": f"Invalid entity_type: {entity_type}. Must be one of: {', '.join(_VALID_ENTITY_TYPES)}"}
     try:
-        items, total = await graph_db.list_idea_nodes(
-            user_id, limit=limit or 50, offset=offset or 0,
-            idea_type=idea_type, status=status, tags=tags,
-        )
-        return {"success": True, "count": len(items), "total": total, "ideas": items}
+        logger.info("[list_entities] user_id=%s, type=%s, limit=%d, offset=%d", user_id, entity_type, limit, offset)
+        items, total = await md_storage.list_entities(user_id, entity_type, limit, offset, **(filters or {}))
+        return {"items": items, "total": total, "offset": offset, "limit": limit}
     except Exception as e:
-        logger.exception("[list_ideas] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
+        logger.exception("[list_entities] failed")
+        return {"error": f"Error listing {entity_type}s: {str(e)}"}
 
 
-async def update_idea_tool(user_id: str, idea_id: str, **kwargs) -> dict:
-    """Update an existing idea."""
+async def update_entity(user_id: str, entity_type: str, entity_id: str, updates: dict) -> dict:
+    """Update an entity."""
+    if entity_type not in _VALID_ENTITY_TYPES:
+        return {"error": f"Invalid entity_type: {entity_type}. Must be one of: {', '.join(_VALID_ENTITY_TYPES)}"}
     try:
-        idea = await graph_db.get_idea_node(idea_id)
-        if not idea:
-            return {"success": False, "message": f"Idea {idea_id} not found"}
-        if idea.get("user_id") != user_id:
-            return {"success": False, "message": "Access denied"}
-        updates = {k: v for k, v in kwargs.items() if v is not None}
-        updated = await graph_db.update_idea_node(idea_id, **updates)
-        return {"success": True, "message": f"Updated idea: {updated.get('name', '')}", "idea": updated}
+        logger.info("[update_entity] user_id=%s, type=%s, id=%s", user_id, entity_type, entity_id)
+        result = await md_storage.update_entity(user_id, entity_type, entity_id, updates)
+        if result is None:
+            return {"error": f"{entity_type} not found: {entity_id}"}
+        return result
     except Exception as e:
-        logger.exception("[update_idea] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
+        logger.exception("[update_entity] failed")
+        return {"error": f"Error updating {entity_type}: {str(e)}"}
 
 
-async def delete_idea_tool(user_id: str, idea_id: str) -> dict:
-    """Delete an idea."""
+async def delete_entity(user_id: str, entity_type: str, entity_id: str) -> dict:
+    """Delete an entity."""
+    if entity_type not in _VALID_ENTITY_TYPES:
+        return {"error": f"Invalid entity_type: {entity_type}. Must be one of: {', '.join(_VALID_ENTITY_TYPES)}"}
     try:
-        idea = await graph_db.get_idea_node(idea_id)
-        if not idea:
-            return {"success": False, "message": f"Idea {idea_id} not found"}
-        if idea.get("user_id") != user_id:
-            return {"success": False, "message": "Access denied"}
-        name = idea.get("name", "Unknown")
-        await graph_db.delete_idea_node(idea_id)
-        return {"success": True, "message": f"Deleted idea: {name}", "deleted_id": idea_id}
+        logger.info("[delete_entity] user_id=%s, type=%s, id=%s", user_id, entity_type, entity_id)
+        deleted = await md_storage.delete_entity(user_id, entity_type, entity_id)
+        return {"deleted": deleted, "entity_id": entity_id}
     except Exception as e:
-        logger.exception("[delete_idea] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
+        logger.exception("[delete_entity] failed")
+        return {"error": f"Error deleting {entity_type}: {str(e)}"}
 
 
-async def search_ideas_tool(user_id: str, search_term: str) -> dict:
-    """Search ideas using semantic similarity with fallback."""
+async def search_entities(user_id: str, entity_type: str, query: str, limit: int = 20) -> dict:
+    """Search entities by keyword."""
+    if entity_type not in _VALID_ENTITY_TYPES:
+        return {"error": f"Invalid entity_type: {entity_type}. Must be one of: {', '.join(_VALID_ENTITY_TYPES)}"}
     try:
-        try:
-            query_embedding = embedding_service.generate_text_embedding(search_term)
-            matches = vector_db.idea_semantic_search(user_id, query_embedding, limit=5)
-            if matches:
-                ideas = []
-                for match in matches:
-                    idea = await graph_db.get_idea_node(match["idea_id"])
-                    if idea:
-                        idea["similarity_score"] = match["similarity_score"]
-                        ideas.append(idea)
-                return {"success": True, "count": len(ideas), "search_type": "semantic", "ideas": ideas}
-        except Exception:
-            pass
-        ideas = await graph_db.search_ideas(user_id, search_term)
-        return {"success": True, "count": len(ideas), "search_type": "exact", "ideas": ideas}
+        logger.info("[search_entities] user_id=%s, type=%s, query=%s", user_id, entity_type, query)
+        results = await md_storage.search_entities(user_id, entity_type, query, limit)
+        return {"results": results, "total": len(results)}
     except Exception as e:
-        logger.exception("[search_ideas] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-# =====================================================================
-# Content Tools
-# =====================================================================
-
-async def create_content_tool(user_id: str, title: str, **kwargs) -> dict:
-    """Create new content in the knowledge graph."""
-    try:
-        logger.info("[create_content] user_id=%s, title=%s", user_id, title)
-        content = await graph_db.create_content_node(user_id=user_id, title=title, **kwargs)
-        return {"success": True, "message": f"Successfully created content: {title}", "content": content}
-    except Exception as e:
-        logger.exception("[create_content] failed")
-        return {"success": False, "message": f"Error creating content: {str(e)}"}
-
-
-async def get_content_tool(user_id: str, content_id: str) -> dict:
-    """Get details of specific content by ID."""
-    try:
-        content = await graph_db.get_content_node(content_id)
-        if not content:
-            return {"success": False, "message": f"Content {content_id} not found"}
-        if content.get("user_id") != user_id:
-            return {"success": False, "message": "Access denied"}
-        return {"success": True, "content": content}
-    except Exception as e:
-        logger.exception("[get_content] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-async def list_content_tool(
-    user_id: str, limit: int | None = 50, offset: int | None = 0,
-    content_type: str | None = None, status: str | None = None,
-    tags: list[str] | None = None,
-) -> dict:
-    """List content for the current user."""
-    try:
-        items, total = await graph_db.list_content_nodes(
-            user_id, limit=limit or 50, offset=offset or 0,
-            content_type=content_type, status=status, tags=tags,
-        )
-        return {"success": True, "count": len(items), "total": total, "content": items}
-    except Exception as e:
-        logger.exception("[list_content] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-async def update_content_tool(user_id: str, content_id: str, **kwargs) -> dict:
-    """Update existing content."""
-    try:
-        content = await graph_db.get_content_node(content_id)
-        if not content:
-            return {"success": False, "message": f"Content {content_id} not found"}
-        if content.get("user_id") != user_id:
-            return {"success": False, "message": "Access denied"}
-        updates = {k: v for k, v in kwargs.items() if v is not None}
-        updated = await graph_db.update_content_node(content_id, **updates)
-        return {"success": True, "message": f"Updated content: {updated.get('title', '')}", "content": updated}
-    except Exception as e:
-        logger.exception("[update_content] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-async def delete_content_tool(user_id: str, content_id: str) -> dict:
-    """Delete content."""
-    try:
-        content = await graph_db.get_content_node(content_id)
-        if not content:
-            return {"success": False, "message": f"Content {content_id} not found"}
-        if content.get("user_id") != user_id:
-            return {"success": False, "message": "Access denied"}
-        title = content.get("title", "Unknown")
-        await graph_db.delete_content_node(content_id)
-        return {"success": True, "message": f"Deleted content: {title}", "deleted_id": content_id}
-    except Exception as e:
-        logger.exception("[delete_content] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-async def search_content_tool(user_id: str, search_term: str) -> dict:
-    """Search content using semantic similarity with fallback."""
-    try:
-        try:
-            query_embedding = embedding_service.generate_text_embedding(search_term)
-            matches = vector_db.content_semantic_search(user_id, query_embedding, limit=5)
-            if matches:
-                items = []
-                for match in matches:
-                    content = await graph_db.get_content_node(match["content_id"])
-                    if content:
-                        content["similarity_score"] = match["similarity_score"]
-                        items.append(content)
-                return {"success": True, "count": len(items), "search_type": "semantic", "content": items}
-        except Exception:
-            pass
-        items = await graph_db.search_content(user_id, search_term)
-        return {"success": True, "count": len(items), "search_type": "exact", "content": items}
-    except Exception as e:
-        logger.exception("[search_content] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-# =====================================================================
-# Project Tools
-# =====================================================================
-
-async def create_project_tool(user_id: str, name: str, **kwargs) -> dict:
-    """Create a new project in the knowledge graph."""
-    try:
-        logger.info("[create_project] user_id=%s, name=%s", user_id, name)
-        project = await graph_db.create_project_node(user_id=user_id, name=name, **kwargs)
-        return {"success": True, "message": f"Successfully created project: {name}", "project": project}
-    except Exception as e:
-        logger.exception("[create_project] failed")
-        return {"success": False, "message": f"Error creating project: {str(e)}"}
-
-
-async def get_project_tool(user_id: str, project_id: str) -> dict:
-    """Get details of a specific project by ID."""
-    try:
-        project = await graph_db.get_project_node(project_id)
-        if not project:
-            return {"success": False, "message": f"Project {project_id} not found"}
-        if project.get("user_id") != user_id:
-            return {"success": False, "message": "Access denied"}
-        return {"success": True, "project": project}
-    except Exception as e:
-        logger.exception("[get_project] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-async def list_projects_tool(
-    user_id: str, limit: int | None = 50, offset: int | None = 0,
-    project_type: str | None = None, status: str | None = None,
-    tags: list[str] | None = None,
-) -> dict:
-    """List projects for the current user."""
-    try:
-        items, total = await graph_db.list_project_nodes(
-            user_id, limit=limit or 50, offset=offset or 0,
-            project_type=project_type, status=status, tags=tags,
-        )
-        return {"success": True, "count": len(items), "total": total, "projects": items}
-    except Exception as e:
-        logger.exception("[list_projects] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-async def update_project_tool(user_id: str, project_id: str, **kwargs) -> dict:
-    """Update an existing project."""
-    try:
-        project = await graph_db.get_project_node(project_id)
-        if not project:
-            return {"success": False, "message": f"Project {project_id} not found"}
-        if project.get("user_id") != user_id:
-            return {"success": False, "message": "Access denied"}
-        updates = {k: v for k, v in kwargs.items() if v is not None}
-        updated = await graph_db.update_project_node(project_id, **updates)
-        return {"success": True, "message": f"Updated project: {updated.get('name', '')}", "project": updated}
-    except Exception as e:
-        logger.exception("[update_project] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-async def delete_project_tool(user_id: str, project_id: str) -> dict:
-    """Delete a project."""
-    try:
-        project = await graph_db.get_project_node(project_id)
-        if not project:
-            return {"success": False, "message": f"Project {project_id} not found"}
-        if project.get("user_id") != user_id:
-            return {"success": False, "message": "Access denied"}
-        name = project.get("name", "Unknown")
-        await graph_db.delete_project_node(project_id)
-        return {"success": True, "message": f"Deleted project: {name}", "deleted_id": project_id}
-    except Exception as e:
-        logger.exception("[delete_project] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-async def search_projects_tool(user_id: str, search_term: str) -> dict:
-    """Search projects using semantic similarity with fallback."""
-    try:
-        try:
-            query_embedding = embedding_service.generate_text_embedding(search_term)
-            matches = vector_db.project_semantic_search(user_id, query_embedding, limit=5)
-            if matches:
-                items = []
-                for match in matches:
-                    project = await graph_db.get_project_node(match["project_id"])
-                    if project:
-                        project["similarity_score"] = match["similarity_score"]
-                        items.append(project)
-                return {"success": True, "count": len(items), "search_type": "semantic", "projects": items}
-        except Exception:
-            pass
-        items = await graph_db.search_projects(user_id, search_term)
-        return {"success": True, "count": len(items), "search_type": "exact", "projects": items}
-    except Exception as e:
-        logger.exception("[search_projects] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-# =====================================================================
-# Cross-Entity Tools
-# =====================================================================
-
-async def link_entities_tool(
-    user_id: str,
-    from_type: str, from_id: str,
-    to_type: str, to_id: str,
-    rel_type: str, properties: dict | None = None,
-) -> dict:
-    """Create a cross-entity relationship."""
-    try:
-        logger.info("[link_entities] %s:%s -> %s:%s (%s)", from_type, from_id, to_type, to_id, rel_type)
-        result = await graph_db.link_entities(from_type, from_id, to_type, to_id, rel_type, properties)
-        if result:
-            return {"success": True, "message": f"Linked {result['from']} -> {result['to']} ({rel_type})", "link": result}
-        return {"success": False, "message": "One or both entities not found"}
-    except ValueError as e:
-        return {"success": False, "message": str(e)}
-    except Exception as e:
-        logger.exception("[link_entities] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
-async def get_entity_graph_tool(user_id: str, entity_type: str, entity_id: str) -> dict:
-    """Get all connections of any entity."""
-    try:
-        label_map = {"Person": "Person", "Idea": "Idea", "Content": "Content", "Project": "Project"}
-        label = label_map.get(entity_type)
-        if not label:
-            return {"success": False, "message": f"Invalid entity type: {entity_type}"}
-        result = await graph_db.get_entity_graph(label, entity_id)
-        if not result.get("entity"):
-            return {"success": False, "message": "Entity not found"}
-        return {"success": True, "entity": result["entity"], "connections": result["connections"]}
-    except Exception as e:
-        logger.exception("[get_entity_graph] failed")
-        return {"success": False, "message": f"Error: {str(e)}"}
+        logger.exception("[search_entities] failed")
+        return {"error": f"Error searching {entity_type}s: {str(e)}"}
