@@ -1,11 +1,10 @@
-"""Content entity routes (Neo4j knowledge graph + pgvector)."""
+"""Content entity routes (markdown file storage)."""
 
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.concurrency import run_in_threadpool
 
-from .. import schemas, database, auth, graph_db, vector_db
+from .. import schemas, database, auth, md_storage
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +16,9 @@ async def create_content(
     content_data: schemas.ContentCreate,
     current_user: database.User = Depends(auth.get_current_user),
 ):
-    """Create new content in the knowledge graph."""
-    create_kwargs = content_data.model_dump(exclude_unset=False)
-    content = await graph_db.create_content_node(user_id=str(current_user.id), **create_kwargs)
-    return content
+    """Create new content."""
+    result = await md_storage.create_entity(str(current_user.id), "content", content_data.model_dump())
+    return result
 
 
 @router.get("")
@@ -33,10 +31,15 @@ async def get_content_list(
     tags: str | None = Query(default=None, description="Comma-separated tags"),
 ):
     """List content for the authenticated user."""
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    items, total = await graph_db.list_content_nodes(
-        user_id=str(current_user.id), limit=limit, offset=offset,
-        content_type=content_type, status=content_status, tags=tag_list,
+    filters: dict = {}
+    if content_type:
+        filters["content_type"] = content_type
+    if content_status:
+        filters["status"] = content_status
+    if tags:
+        filters["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+    items, total = await md_storage.list_entities(
+        str(current_user.id), "content", limit, offset, **filters,
     )
     return {"items": items, "total": total, "offset": offset, "limit": limit}
 
@@ -47,7 +50,7 @@ async def get_content(
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Get specific content."""
-    content = await graph_db.get_content_node(content_id)
+    content = await md_storage.get_entity(str(current_user.id), "content", content_id)
     if not content:
         raise HTTPException(status_code=404, detail={"code": "CONTENT_NOT_FOUND", "message": "Content not found"})
     if content.get("user_id") != str(current_user.id):
@@ -62,13 +65,14 @@ async def update_content(
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Full update of content."""
-    content = await graph_db.get_content_node(content_id)
+    content = await md_storage.get_entity(str(current_user.id), "content", content_id)
     if not content:
         raise HTTPException(status_code=404, detail={"code": "CONTENT_NOT_FOUND", "message": "Content not found"})
     if content.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "Access denied"})
     updates = {k: v for k, v in content_data.model_dump(exclude_unset=True).items() if v is not None}
-    return await graph_db.update_content_node(content_id, **updates)
+    result = await md_storage.update_entity(str(current_user.id), "content", content_id, updates)
+    return result
 
 
 @router.patch("/{content_id}")
@@ -78,7 +82,7 @@ async def patch_content(
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Partial update of content."""
-    content = await graph_db.get_content_node(content_id)
+    content = await md_storage.get_entity(str(current_user.id), "content", content_id)
     if not content:
         raise HTTPException(status_code=404, detail={"code": "CONTENT_NOT_FOUND", "message": "Content not found"})
     if content.get("user_id") != str(current_user.id):
@@ -86,7 +90,8 @@ async def patch_content(
     updates = {k: v for k, v in content_data.model_dump(exclude_unset=True).items() if v is not None}
     if not updates:
         return content
-    return await graph_db.update_content_node(content_id, **updates)
+    result = await md_storage.update_entity(str(current_user.id), "content", content_id, updates)
+    return result
 
 
 @router.delete("/{content_id}")
@@ -95,12 +100,12 @@ async def delete_content(
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Delete content."""
-    content = await graph_db.get_content_node(content_id)
+    content = await md_storage.get_entity(str(current_user.id), "content", content_id)
     if not content:
         raise HTTPException(status_code=404, detail={"code": "CONTENT_NOT_FOUND", "message": "Content not found"})
     if content.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "Access denied"})
-    await graph_db.delete_content_node(content_id)
+    await md_storage.delete_entity(str(current_user.id), "content", content_id)
     return {"status": "deleted", "content_id": content_id}
 
 
@@ -109,16 +114,8 @@ async def semantic_search_content(
     search_req: schemas.SemanticSearchRequest,
     current_user: database.User = Depends(auth.get_current_user),
 ):
-    """Search content using semantic similarity."""
-    from .. import embedding_service
-    query_embedding = await run_in_threadpool(embedding_service.generate_text_embedding, search_req.query)
-    matches = await run_in_threadpool(
-        vector_db.content_semantic_search,
-        user_id=str(current_user.id), query_embedding=query_embedding, limit=search_req.limit,
+    """Search content using keyword matching."""
+    results = await md_storage.search_entities(
+        str(current_user.id), "content", search_req.query, search_req.limit,
     )
-    results = []
-    for match in matches:
-        content = await graph_db.get_content_node(match["content_id"])
-        if content:
-            results.append({**content, "similarity_score": match["similarity_score"]})
     return results

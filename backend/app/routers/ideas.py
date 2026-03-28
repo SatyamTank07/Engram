@@ -1,11 +1,10 @@
-"""Idea entity routes (Neo4j knowledge graph + pgvector)."""
+"""Idea entity routes (markdown file storage)."""
 
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.concurrency import run_in_threadpool
 
-from .. import schemas, database, auth, graph_db, vector_db
+from .. import schemas, database, auth, md_storage
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +16,9 @@ async def create_idea(
     idea_data: schemas.IdeaCreate,
     current_user: database.User = Depends(auth.get_current_user),
 ):
-    """Create a new idea in the knowledge graph."""
-    create_kwargs = idea_data.model_dump(exclude_unset=False)
-    idea = await graph_db.create_idea_node(user_id=str(current_user.id), **create_kwargs)
-    return idea
+    """Create a new idea."""
+    result = await md_storage.create_entity(str(current_user.id), "idea", idea_data.model_dump())
+    return result
 
 
 @router.get("")
@@ -33,10 +31,15 @@ async def get_ideas(
     tags: str | None = Query(default=None, description="Comma-separated tags"),
 ):
     """List ideas for the authenticated user."""
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    items, total = await graph_db.list_idea_nodes(
-        user_id=str(current_user.id), limit=limit, offset=offset,
-        idea_type=idea_type, status=idea_status, tags=tag_list,
+    filters: dict = {}
+    if idea_type:
+        filters["idea_type"] = idea_type
+    if idea_status:
+        filters["status"] = idea_status
+    if tags:
+        filters["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+    items, total = await md_storage.list_entities(
+        str(current_user.id), "idea", limit, offset, **filters,
     )
     return {"items": items, "total": total, "offset": offset, "limit": limit}
 
@@ -47,7 +50,7 @@ async def get_idea(
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Get a specific idea."""
-    idea = await graph_db.get_idea_node(idea_id)
+    idea = await md_storage.get_entity(str(current_user.id), "idea", idea_id)
     if not idea:
         raise HTTPException(status_code=404, detail={"code": "IDEA_NOT_FOUND", "message": "Idea not found"})
     if idea.get("user_id") != str(current_user.id):
@@ -62,13 +65,14 @@ async def update_idea(
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Full update of an idea."""
-    idea = await graph_db.get_idea_node(idea_id)
+    idea = await md_storage.get_entity(str(current_user.id), "idea", idea_id)
     if not idea:
         raise HTTPException(status_code=404, detail={"code": "IDEA_NOT_FOUND", "message": "Idea not found"})
     if idea.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "Access denied"})
     updates = {k: v for k, v in idea_data.model_dump(exclude_unset=True).items() if v is not None}
-    return await graph_db.update_idea_node(idea_id, **updates)
+    result = await md_storage.update_entity(str(current_user.id), "idea", idea_id, updates)
+    return result
 
 
 @router.patch("/{idea_id}")
@@ -78,7 +82,7 @@ async def patch_idea(
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Partial update of an idea."""
-    idea = await graph_db.get_idea_node(idea_id)
+    idea = await md_storage.get_entity(str(current_user.id), "idea", idea_id)
     if not idea:
         raise HTTPException(status_code=404, detail={"code": "IDEA_NOT_FOUND", "message": "Idea not found"})
     if idea.get("user_id") != str(current_user.id):
@@ -86,7 +90,8 @@ async def patch_idea(
     updates = {k: v for k, v in idea_data.model_dump(exclude_unset=True).items() if v is not None}
     if not updates:
         return idea
-    return await graph_db.update_idea_node(idea_id, **updates)
+    result = await md_storage.update_entity(str(current_user.id), "idea", idea_id, updates)
+    return result
 
 
 @router.delete("/{idea_id}")
@@ -95,12 +100,12 @@ async def delete_idea(
     current_user: database.User = Depends(auth.get_current_user),
 ):
     """Delete an idea."""
-    idea = await graph_db.get_idea_node(idea_id)
+    idea = await md_storage.get_entity(str(current_user.id), "idea", idea_id)
     if not idea:
         raise HTTPException(status_code=404, detail={"code": "IDEA_NOT_FOUND", "message": "Idea not found"})
     if idea.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=403, detail={"code": "ACCESS_DENIED", "message": "Access denied"})
-    await graph_db.delete_idea_node(idea_id)
+    await md_storage.delete_entity(str(current_user.id), "idea", idea_id)
     return {"status": "deleted", "idea_id": idea_id}
 
 
@@ -109,17 +114,8 @@ async def semantic_search_ideas(
     search_req: schemas.SemanticSearchRequest,
     current_user: database.User = Depends(auth.get_current_user),
 ):
-    """Search ideas using semantic similarity."""
-    from .. import embedding_service
-    query_embedding = await run_in_threadpool(embedding_service.generate_text_embedding, search_req.query)
-    matches = await run_in_threadpool(
-        vector_db.idea_semantic_search,
-        user_id=str(current_user.id), query_embedding=query_embedding, limit=search_req.limit,
+    """Search ideas using keyword matching."""
+    results = await md_storage.search_entities(
+        str(current_user.id), "idea", search_req.query, search_req.limit,
     )
-    idea_ids = [m["idea_id"] for m in matches]
-    results = []
-    for match in matches:
-        idea = await graph_db.get_idea_node(match["idea_id"])
-        if idea:
-            results.append({**idea, "similarity_score": match["similarity_score"]})
     return results
