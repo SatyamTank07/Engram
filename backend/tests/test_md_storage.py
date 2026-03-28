@@ -25,6 +25,8 @@ from app.md_storage import (
     _rebuild_collection, _rebuild_tree, _build_fallback_tree,
     create_entity, get_entity, list_entities, update_entity, delete_entity,
     rebuild_index, search_entities,
+    add_relationship, update_relationship, delete_relationship,
+    get_relationships, get_entity_connections,
     DATA_DIR,
 )
 
@@ -960,3 +962,192 @@ class TestSearchEntities:
         await md_storage.create_entity(user_id, "idea", {"name": "Something"})
         results = await search_entities(user_id, "idea", "")
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Relationship management tests
+# ---------------------------------------------------------------------------
+class TestRelationships:
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_add_relationship(self, mock_rebuild, user_id):
+        """Adding a relationship creates entries on both sides."""
+        idea_a = await create_entity(user_id, "idea", {"name": "Idea A"})
+        idea_b = await create_entity(user_id, "idea", {"name": "Idea B"})
+
+        result = await add_relationship(
+            user_id, "idea", idea_a["id"], idea_b["id"], "relates_to",
+            properties={"weight": 0.8},
+        )
+
+        assert result is not None
+        assert result["from"] == idea_a["id"]
+        assert result["to"] == idea_b["id"]
+        assert result["relationship"] == "relates_to"
+        assert result["properties"] == {"weight": 0.8}
+
+        # Verify outgoing on from entity
+        from_entity = await get_entity(user_id, "idea", idea_a["id"])
+        from_rels = from_entity["relationships"]
+        assert len(from_rels) == 1
+        assert from_rels[0]["to_id"] == idea_b["id"]
+        assert from_rels[0]["rel_type"] == "relates_to"
+        assert from_rels[0]["direction"] == "outgoing"
+        assert from_rels[0]["weight"] == 0.8
+
+        # Verify incoming on to entity
+        to_entity = await get_entity(user_id, "idea", idea_b["id"])
+        to_rels = to_entity["relationships"]
+        assert len(to_rels) == 1
+        assert to_rels[0]["to_id"] == idea_a["id"]
+        assert to_rels[0]["rel_type"] == "relates_to"
+        assert to_rels[0]["direction"] == "incoming"
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_add_relationship_not_found(self, mock_rebuild, user_id):
+        """Returns None when either entity does not exist."""
+        idea = await create_entity(user_id, "idea", {"name": "Lonely Idea"})
+
+        result = await add_relationship(
+            user_id, "idea", idea["id"], "nonexistent-id", "relates_to",
+        )
+        assert result is None
+
+        result2 = await add_relationship(
+            user_id, "idea", "nonexistent-id", idea["id"], "relates_to",
+        )
+        assert result2 is None
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_get_relationships(self, mock_rebuild, user_id):
+        """get_relationships returns the correct list after adding."""
+        idea_a = await create_entity(user_id, "idea", {"name": "Idea A"})
+        idea_b = await create_entity(user_id, "idea", {"name": "Idea B"})
+
+        await add_relationship(user_id, "idea", idea_a["id"], idea_b["id"], "inspires")
+
+        rels = await get_relationships(user_id, "idea", idea_a["id"])
+        assert len(rels) == 1
+        assert rels[0]["to_id"] == idea_b["id"]
+        assert rels[0]["rel_type"] == "inspires"
+        assert rels[0]["direction"] == "outgoing"
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_get_relationships_empty(self, mock_rebuild, user_id):
+        """A new entity returns an empty relationships list."""
+        idea = await create_entity(user_id, "idea", {"name": "Fresh Idea"})
+        rels = await get_relationships(user_id, "idea", idea["id"])
+        assert rels == []
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_update_relationship(self, mock_rebuild, user_id):
+        """Properties are merged on both sides after update."""
+        idea_a = await create_entity(user_id, "idea", {"name": "Idea A"})
+        idea_b = await create_entity(user_id, "idea", {"name": "Idea B"})
+
+        await add_relationship(
+            user_id, "idea", idea_a["id"], idea_b["id"], "relates_to",
+            properties={"weight": 0.5},
+        )
+
+        updated = await update_relationship(
+            user_id, "idea", idea_a["id"], idea_b["id"], "relates_to",
+            properties={"weight": 0.9, "note": "stronger link"},
+        )
+
+        assert updated is not None
+        assert updated["weight"] == 0.9
+        assert updated["note"] == "stronger link"
+
+        # Verify from side persisted
+        from_rels = await get_relationships(user_id, "idea", idea_a["id"])
+        assert from_rels[0]["weight"] == 0.9
+        assert from_rels[0]["note"] == "stronger link"
+
+        # Verify to side persisted
+        to_rels = await get_relationships(user_id, "idea", idea_b["id"])
+        assert to_rels[0]["weight"] == 0.9
+        assert to_rels[0]["note"] == "stronger link"
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_update_relationship_not_found(self, mock_rebuild, user_id):
+        """Returns None when the relationship does not exist."""
+        idea_a = await create_entity(user_id, "idea", {"name": "Idea A"})
+        idea_b = await create_entity(user_id, "idea", {"name": "Idea B"})
+
+        result = await update_relationship(
+            user_id, "idea", idea_a["id"], idea_b["id"], "nonexistent_rel",
+            properties={"foo": "bar"},
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_delete_relationship(self, mock_rebuild, user_id):
+        """Relationship is removed from both sides."""
+        idea_a = await create_entity(user_id, "idea", {"name": "Idea A"})
+        idea_b = await create_entity(user_id, "idea", {"name": "Idea B"})
+
+        await add_relationship(user_id, "idea", idea_a["id"], idea_b["id"], "relates_to")
+
+        deleted = await delete_relationship(
+            user_id, "idea", idea_a["id"], idea_b["id"], "relates_to",
+        )
+        assert deleted is True
+
+        # Verify removed from both sides
+        from_rels = await get_relationships(user_id, "idea", idea_a["id"])
+        assert len(from_rels) == 0
+
+        to_rels = await get_relationships(user_id, "idea", idea_b["id"])
+        assert len(to_rels) == 0
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_delete_relationship_not_found(self, mock_rebuild, user_id):
+        """Returns False when the relationship does not exist."""
+        idea_a = await create_entity(user_id, "idea", {"name": "Idea A"})
+        idea_b = await create_entity(user_id, "idea", {"name": "Idea B"})
+
+        result = await delete_relationship(
+            user_id, "idea", idea_a["id"], idea_b["id"], "nonexistent_rel",
+        )
+        assert result is False
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_get_entity_connections(self, mock_rebuild, user_id):
+        """Returns entity + resolved connections with display names."""
+        idea_a = await create_entity(user_id, "idea", {"name": "Central Idea"})
+        idea_b = await create_entity(user_id, "idea", {"name": "Related Idea"})
+
+        await add_relationship(
+            user_id, "idea", idea_a["id"], idea_b["id"], "inspires",
+            properties={"strength": "high"},
+        )
+
+        result = await get_entity_connections(user_id, "idea", idea_a["id"])
+
+        assert result is not None
+        assert result["entity"]["id"] == idea_a["id"]
+        assert result["entity"]["name"] == "Central Idea"
+
+        conns = result["connections"]
+        assert len(conns) == 1
+        assert conns[0]["relationship"] == "inspires"
+        assert conns[0]["entity_id"] == idea_b["id"]
+        assert conns[0]["entity_name"] == "Related Idea"
+        assert conns[0]["direction"] == "outgoing"
+        assert conns[0]["properties"] == {"strength": "high"}
+
+    @pytest.mark.asyncio
+    @patch.object(md_storage, "_rebuild_collection_and_tree", new_callable=AsyncMock)
+    async def test_get_entity_connections_not_found(self, mock_rebuild, user_id):
+        """Returns None when entity does not exist."""
+        result = await get_entity_connections(user_id, "idea", "nonexistent-id")
+        assert result is None

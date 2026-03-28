@@ -690,6 +690,199 @@ async def delete_entity(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Relationship management
+# ---------------------------------------------------------------------------
+async def add_relationship(
+    user_id: str,
+    entity_type: str,
+    from_id: str,
+    to_id: str,
+    rel_type: str,
+    properties: dict | None = None,
+    to_entity_type: str | None = None,
+) -> dict | None:
+    """Add a relationship between two entities.
+
+    Creates an outgoing entry on *from_id* and an incoming entry on *to_id*.
+    Returns a summary dict, or ``None`` if either entity is not found.
+    """
+    to_entity_type = to_entity_type or entity_type
+    props = dict(properties or {})
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    from_entity = await get_entity(user_id, entity_type, from_id)
+    to_entity = await get_entity(user_id, to_entity_type, to_id)
+    if from_entity is None or to_entity is None:
+        return None
+
+    outgoing = {
+        "to_id": to_id,
+        "rel_type": rel_type,
+        "direction": "outgoing",
+        "created_at": now_iso,
+        **props,
+    }
+    incoming = {
+        "to_id": from_id,
+        "rel_type": rel_type,
+        "direction": "incoming",
+        "created_at": now_iso,
+        **props,
+    }
+
+    from_rels = list(from_entity.get("relationships") or [])
+    from_rels.append(outgoing)
+
+    to_rels = list(to_entity.get("relationships") or [])
+    to_rels.append(incoming)
+
+    await update_entity(user_id, entity_type, from_id, {"relationships": from_rels})
+    await update_entity(user_id, to_entity_type, to_id, {"relationships": to_rels})
+
+    return {"from": from_id, "to": to_id, "relationship": rel_type, "properties": props}
+
+
+async def update_relationship(
+    user_id: str,
+    entity_type: str,
+    from_id: str,
+    to_id: str,
+    rel_type: str,
+    properties: dict,
+    to_entity_type: str | None = None,
+) -> dict | None:
+    """Update properties on an existing relationship (both sides).
+
+    Returns the updated relationship dict, or ``None`` if not found.
+    """
+    to_entity_type = to_entity_type or entity_type
+
+    from_entity = await get_entity(user_id, entity_type, from_id)
+    to_entity = await get_entity(user_id, to_entity_type, to_id)
+    if from_entity is None or to_entity is None:
+        return None
+
+    # --- update outgoing on from_entity ---
+    from_rels = list(from_entity.get("relationships") or [])
+    found_idx = None
+    for i, rel in enumerate(from_rels):
+        if rel.get("to_id") == to_id and rel.get("rel_type") == rel_type:
+            found_idx = i
+            break
+    if found_idx is None:
+        return None
+    from_rels[found_idx] = {**from_rels[found_idx], **properties}
+
+    # --- update incoming on to_entity ---
+    to_rels = list(to_entity.get("relationships") or [])
+    for i, rel in enumerate(to_rels):
+        if rel.get("to_id") == from_id and rel.get("rel_type") == rel_type:
+            to_rels[i] = {**to_rels[i], **properties}
+            break
+
+    await update_entity(user_id, entity_type, from_id, {"relationships": from_rels})
+    await update_entity(user_id, to_entity_type, to_id, {"relationships": to_rels})
+
+    return from_rels[found_idx]
+
+
+async def delete_relationship(
+    user_id: str,
+    entity_type: str,
+    from_id: str,
+    to_id: str,
+    rel_type: str,
+    to_entity_type: str | None = None,
+) -> bool:
+    """Remove a relationship from both sides. Returns True if found and deleted."""
+    to_entity_type = to_entity_type or entity_type
+
+    from_entity = await get_entity(user_id, entity_type, from_id)
+    to_entity = await get_entity(user_id, to_entity_type, to_id)
+    if from_entity is None or to_entity is None:
+        return False
+
+    from_rels = list(from_entity.get("relationships") or [])
+    new_from = [
+        r for r in from_rels
+        if not (r.get("to_id") == to_id and r.get("rel_type") == rel_type)
+    ]
+    if len(new_from) == len(from_rels):
+        return False  # relationship was not present
+
+    to_rels = list(to_entity.get("relationships") or [])
+    new_to = [
+        r for r in to_rels
+        if not (r.get("to_id") == from_id and r.get("rel_type") == rel_type)
+    ]
+
+    await update_entity(user_id, entity_type, from_id, {"relationships": new_from})
+    await update_entity(user_id, to_entity_type, to_id, {"relationships": new_to})
+    return True
+
+
+async def get_relationships(
+    user_id: str,
+    entity_type: str,
+    entity_id: str,
+) -> list[dict]:
+    """Return the ``relationships`` array for an entity (empty list if none)."""
+    entity = await get_entity(user_id, entity_type, entity_id)
+    if entity is None:
+        return []
+    return list(entity.get("relationships") or [])
+
+
+async def get_entity_connections(
+    user_id: str,
+    entity_type: str,
+    entity_id: str,
+    to_entity_type: str | None = None,
+) -> dict | None:
+    """Return the entity together with resolved connection details.
+
+    Each connection includes the relationship metadata and the connected
+    entity's id and display name.  Returns ``None`` if the entity is not found.
+    """
+    to_entity_type = to_entity_type or entity_type
+
+    entity = await get_entity(user_id, entity_type, entity_id)
+    if entity is None:
+        return None
+
+    rels = list(entity.get("relationships") or [])
+    connections: list[dict] = []
+    for rel in rels:
+        connected_id = rel.get("to_id", "")
+        # Determine which type to look up — for incoming rels the connected
+        # entity authored the relationship, so it could be a different type.
+        lookup_type = to_entity_type
+        connected = await get_entity(user_id, lookup_type, connected_id)
+        if connected is None and lookup_type != entity_type:
+            connected = await get_entity(user_id, entity_type, connected_id)
+
+        display_field = _DISPLAY_FIELD.get(
+            connected.get("type", entity_type) if connected else entity_type, "name"
+        )
+        display_name = connected.get(display_field, "unknown") if connected else "unknown"
+
+        # Build props dict — everything except the structural keys
+        props = {
+            k: v for k, v in rel.items()
+            if k not in ("to_id", "rel_type", "direction", "created_at")
+        }
+        connections.append({
+            "relationship": rel.get("rel_type", ""),
+            "properties": props,
+            "entity_id": connected_id,
+            "entity_name": display_name,
+            "direction": rel.get("direction", "outgoing"),
+        })
+
+    return {"entity": entity, "connections": connections}
+
+
 async def rebuild_index(user_id: str, entity_type: str) -> dict:
     """Scan entity dir for all .md files, rebuild index from scratch, and save it."""
     entity_dir = _get_entity_dir(user_id, entity_type)
