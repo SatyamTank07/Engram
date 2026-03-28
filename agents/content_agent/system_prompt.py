@@ -1,33 +1,34 @@
 """
-Focused system prompt for the Content sub-agent.
-Only contains content-related instructions (no Person/Idea/Project).
+System prompt for the Content sub-agent.
+Rendered from Jinja2 template with dynamic context variables.
 """
 
-CONTENT_AGENT_PROMPT = """You are a Content Tracker specialist agent. Your sole responsibility is managing content consumption (books, articles, videos, podcasts, etc.) in the knowledge graph.
+from agents.common.prompt_loader import render_prompt
 
-CORE INSTRUCTIONS:
-1. **Be Proactive**: If a user mentions reading, watching, or consuming content, check if it exists using `search_content`. If found, `update_content` with new info. If not, `create_content`.
-2. **Context Retrieval**: Use `search_content` (semantic search) or `list_content` before answering. Searching "productivity books" finds content whose title/notes mentions productivity + books.
-3. **Data Integrity**: Use `get_content` to verify details before updating.
-4. **Tool Transparency**: Briefly mention what you've done (e.g., "I've added Atomic Habits to your reading list.").
+# Enum values injected into the template
+CONTENT_TYPES = ["book", "article", "video", "podcast", "paper", "course", "movie", "tweet", "talk"]
+CONTENT_STATUSES = ["want", "reading", "completed", "abandoned"]
 
-CONTENT FIELDS YOU CAN STORE:
-- **Basic**: title, content_type, author, source_url
-- **Type**: book, article, video, podcast, paper, course, movie, tweet, talk
-- **Tracking**: status (want/reading/completed/abandoned), your_rating (0-1)
-- **Context**: personal_notes, recommended_by, tags[]
+DEFAULT_TOOLS = [
+    {"name": "create_content", "description": "Create new content. Include all extractable fields."},
+    {"name": "search_content", "description": "Semantic search by title/description. Always search before creating."},
+    {"name": "list_content", "description": "List all content. Supports pagination and filters (content_type, status, tags)."},
+    {"name": "get_content", "description": "Fetch full details by ID."},
+    {"name": "update_content", "description": "Modify content fields."},
+    {"name": "delete_content", "description": "Remove content (only if user explicitly asks)."},
+]
 
-Extract as many fields as possible from conversation. Examples:
-- "I'm reading Atomic Habits by James Clear" → content_type=book, author=James Clear, status=reading
-- "Just finished watching a great TED talk on AI" → content_type=talk, status=completed
-- "Rahul recommended Sapiens" → content_type=book, recommended_by=Rahul, status=want
 
-AVAILABLE TOOLS:
-- `create_content`: Create new content. Include all extractable fields.
-- `search_content`: Semantic search by title/description. Always search before creating.
-- `list_content`: List all content. Supports pagination and filters (content_type, status, tags).
-- `get_content`: Fetch full details by ID.
-- `update_content`: Modify content fields.
-- `delete_content`: Remove content (only if user explicitly asks).
+def get_content_prompt(user_name: str | None = None, tools: list | None = None) -> str:
+    """Render the content agent system prompt with context variables."""
+    return render_prompt(
+        "content_agent",
+        user_name=user_name,
+        tools=tools or DEFAULT_TOOLS,
+        content_types=CONTENT_TYPES,
+        content_statuses=CONTENT_STATUSES,
+    )
 
-Maintain a professional yet friendly tone. Ask for clarification if unsure."""
+
+# Backwards-compatible constant
+CONTENT_AGENT_PROMPT = get_content_prompt()

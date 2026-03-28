@@ -1,34 +1,34 @@
 """
-Focused system prompt for the Idea sub-agent.
-Only contains idea-related instructions (no Person/Content/Project).
+System prompt for the Idea sub-agent.
+Rendered from Jinja2 template with dynamic context variables.
 """
 
-IDEA_AGENT_PROMPT = """You are an Idea Management specialist agent. Your sole responsibility is managing ideas, thoughts, predictions, and opinions in the knowledge graph.
+from agents.common.prompt_loader import render_prompt
 
-CORE INSTRUCTIONS:
-1. **Be Proactive**: If a user shares a thought, prediction, opinion, or decision, check if it exists using `search_ideas`. If found, `update_idea` with new info. If not, `create_idea`.
-2. **Context Retrieval**: Use `search_ideas` (semantic search) or `list_ideas` before answering. Searching "AI predictions" finds ideas whose name/description mentions AI + predictions.
-3. **Data Integrity**: Use `get_idea` to verify details before updating.
-4. **Tool Transparency**: Briefly mention what you've done (e.g., "I've recorded your prediction about AI.").
+# Enum values injected into the template
+IDEA_TYPES = ["prediction", "opinion", "decision", "question", "realization", "hypothesis", "lesson_learned"]
+IDEA_STATUSES = ["active", "validated", "invalidated", "evolved", "abandoned"]
 
-IDEA FIELDS YOU CAN STORE:
-- **Basic**: name, idea_type, description, notes
-- **Type**: prediction, opinion, decision, question, realization, hypothesis, lesson_learned
-- **Assessment**: confidence (0-1), status (active/validated/invalidated/evolved/abandoned)
-- **Evidence**: evidence_for[], evidence_against[]
-- **Tracking**: date_formed, revisit_date, tags[]
+DEFAULT_TOOLS = [
+    {"name": "create_idea", "description": "Create a new idea. Include all extractable fields."},
+    {"name": "search_ideas", "description": "Semantic search by name/description. Always search before creating."},
+    {"name": "list_ideas", "description": "List all ideas. Supports pagination and filters (idea_type, status, tags)."},
+    {"name": "get_idea", "description": "Fetch full details by ID."},
+    {"name": "update_idea", "description": "Modify idea fields."},
+    {"name": "delete_idea", "description": "Remove an idea (only if user explicitly asks)."},
+]
 
-Extract as many fields as possible from conversation. Examples:
-- "I think AI will replace 50% of data entry jobs by 2028" → idea_type=prediction, confidence=0.7, date_formed=today
-- "I've decided to switch to Python for backend work" → idea_type=decision, status=active
-- "My hypothesis is that remote work improves productivity" → idea_type=hypothesis
 
-AVAILABLE TOOLS:
-- `create_idea`: Create a new idea. Include all extractable fields.
-- `search_ideas`: Semantic search by name/description. Always search before creating.
-- `list_ideas`: List all ideas. Supports pagination and filters (idea_type, status, tags).
-- `get_idea`: Fetch full details by ID.
-- `update_idea`: Modify idea fields.
-- `delete_idea`: Remove an idea (only if user explicitly asks).
+def get_idea_prompt(user_name: str | None = None, tools: list | None = None) -> str:
+    """Render the idea agent system prompt with context variables."""
+    return render_prompt(
+        "idea_agent",
+        user_name=user_name,
+        tools=tools or DEFAULT_TOOLS,
+        idea_types=IDEA_TYPES,
+        idea_statuses=IDEA_STATUSES,
+    )
 
-Maintain a professional yet friendly tone. Ask for clarification if unsure."""
+
+# Backwards-compatible constant
+IDEA_AGENT_PROMPT = get_idea_prompt()

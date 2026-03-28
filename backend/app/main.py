@@ -5,10 +5,11 @@ Route logic lives in backend/app/routers/.
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Request, Response
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +26,7 @@ from .routers import (
 )
 from .routers.deps import limiter, UPLOAD_DIR
 
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data"))
 
 # ---------------------------------------------------------------------------
 # Standardized error helpers
@@ -78,6 +80,16 @@ async def lifespan(app):
         logger.info("Neo4j knowledge graph initialized successfully")
     except Exception as e:
         logger.warning("Could not initialize Neo4j: %s. Person identity features may not work.", e)
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    logger.info("Data directory ready: %s", DATA_DIR)
+
+    # Optional: rebuild indexes on startup for recovery
+    if os.environ.get("REBUILD_INDEX_ON_START", "").lower() == "true":
+        from app.md_storage import rebuild_index
+        for etype in ("idea", "content", "project"):
+            # Runs per-user; for now use a sentinel or scan data dir
+            logger.info("Startup rebuild_index for %s", etype)
 
     sync_task = asyncio.create_task(sync_worker.run_sync_worker())
     logger.info("Engram backend ready")
@@ -185,6 +197,21 @@ async def pending_sync_stats(
     """Return counts of pending/failed embedding sync operations."""
     stats = await run_in_threadpool(vector_db.get_pending_sync_stats)
     return stats
+
+
+@app.post("/api/v1/admin/rebuild-index")
+async def admin_rebuild_index(
+    entity_type: str = Query(..., description="Entity type: idea, content, or project"),
+    current_user: database.User = Depends(auth.get_current_user),
+):
+    """Rebuild the _index.json for a given entity type from .md files on disk."""
+    from .md_storage import rebuild_index
+
+    if entity_type not in ("idea", "content", "project"):
+        raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": f"Invalid entity_type: {entity_type}"})
+
+    new_index = await rebuild_index(str(current_user.id), entity_type)
+    return {"status": "ok", "entity_type": entity_type, "total": len(new_index)}
 
 
 # ---------------------------------------------------------------------------
